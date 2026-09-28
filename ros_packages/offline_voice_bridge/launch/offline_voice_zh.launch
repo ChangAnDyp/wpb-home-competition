@@ -1,0 +1,67 @@
+<launch>
+  <!--
+    Drop-in replacement for the vendor offline_voice_bridge launch file.
+    The argument names match the originals so that
+    wpb_task1_owner_search/launch/task1_owner_search_real.launch can include
+    this file without any change.
+
+    Speech synthesis runs on Piper (same engine the vendor used) and is played
+    through aplay, so start_sound_play is accepted but not required.
+  -->
+
+  <arg name="start_tts" default="true" />
+  <arg name="start_asr" default="false" />
+  <arg name="start_sound_play" default="true" />
+  <arg name="asr_capture_device" default="plughw:CARD=Generic_1,DEV=0" />
+  <arg name="asr_energy_threshold" default="300" />
+
+  <!--
+    PulseAudio 采集参数。wpb_task1_owner_search 的 launch 会传入这四个参数，
+    所以必须在这里声明，否则 roslaunch 会直接报
+    "unused args [...] for include of offline_voice_zh.launch" 并终止启动。
+
+    默认值做成“关闭”，这样单独启动本文件时行为和以前完全一致；
+    只有显式传 asr_capture_backend:=pulse 时才会去操作 PulseAudio。
+
+    asr_capture_backend : off / pulse / auto
+    asr_capture_source  : PulseAudio 源名，留空则自动查找 Kinect 麦克风阵列
+    asr_capture_volume  : 采集源音量，例如 150%
+    asr_capture_gain    : 软件增益（识别前对 PCM 做放大），例如 2.0
+  -->
+  <arg name="asr_capture_backend" default="off" />
+  <arg name="asr_capture_source" default="" />
+  <arg name="asr_capture_volume" default="100%" />
+  <arg name="asr_capture_gain" default="1.0" />
+
+  <arg name="say_topic" default="/voice/say" />
+  <arg name="asr_topic" default="/voice/asr_text" />
+
+  <arg name="piper_binary" default="$(env HOME)/piper/piper/piper" />
+  <arg name="voice_model" default="$(env HOME)/piper/voices/zh_CN-huayan-medium.onnx" />
+  <arg name="tts_speaker_device" default="" />
+  <arg name="tts_length_scale" default="1.0" />
+  <arg name="keep_wav" default="false" />
+  <arg name="asr_model_path" default="$(env HOME)/models/SenseVoiceSmall" />
+
+  <node if="$(arg start_tts)" pkg="offline_voice_bridge" type="offline_tts_node.py"
+        name="offline_tts_node" output="screen" respawn="true">
+    <param name="say_topic" value="$(arg say_topic)" />
+    <param name="piper_binary" value="$(arg piper_binary)" />
+    <param name="voice_model" value="$(arg voice_model)" />
+    <param name="speaker_device" value="$(arg tts_speaker_device)" />
+    <param name="length_scale" value="$(arg tts_length_scale)" />
+    <param name="keep_wav" value="$(arg keep_wav)" />
+  </node>
+
+  <node if="$(arg start_asr)" pkg="offline_voice_bridge" type="offline_asr_node.py"
+        name="offline_asr_node" output="screen">
+    <param name="asr_topic" value="$(arg asr_topic)" />
+    <param name="capture_device" value="$(arg asr_capture_device)" />
+    <param name="capture_backend" value="$(arg asr_capture_backend)" />
+    <param name="capture_source" value="$(arg asr_capture_source)" />
+    <param name="capture_volume" value="$(arg asr_capture_volume)" />
+    <param name="input_gain" value="$(arg asr_capture_gain)" />
+    <param name="energy_threshold" value="$(arg asr_energy_threshold)" />
+    <param name="model_path" value="$(arg asr_model_path)" />
+  </node>
+</launch>

@@ -1,0 +1,30 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 编译产物
+build/
+devel/
+logs/
+
+# 运行时产生的日志与临时文件
+*.log
+*.bag
+/tmp/
+
+# ---- 隐私 / 个人数据：绝对不要提交 ----
+# 主人参考照片（属于个人肖像）
+**/data/owner/*.jpg
+**/data/owner/*.jpeg
+**/data/owner/*.png
+**/data/owner/*.webp
+# 主人注册档案（人脸 / 人体生物特征）
+**/data/reid_owner*/
+**/data/reid_owner_voice/
+*.npz
+
+# 大型模型与下载缓存（体积大，改为按 INSTALL.md 单独安装）
+**/models/whisper/
+*.tar.zst
+*.tar.gz

@@ -1,0 +1,75 @@
+<launch>
+  <arg name="show_yolo_viewer" default="false" />
+  <arg name="yolo_output" default="log" />
+  <arg name="yolo_respawn" default="true" />
+  <arg name="yolo_respawn_delay" default="2.0" />
+  <arg name="viewer_respawn" default="true" />
+  <arg name="start_rviz" default="true" />
+  <arg name="start_voice" default="true" />
+  <arg name="start_asr" default="false" />
+  <arg name="start_tts" default="true" />
+  <arg name="start_sound_play" default="true" />
+  <arg name="asr_capture_device" default="default" />
+  <arg name="asr_capture_backend" default="pulse" />
+  <arg name="asr_capture_source" default="" />
+  <arg name="asr_capture_volume" default="150%" />
+  <arg name="asr_capture_gain" default="2.0" />
+  <arg name="asr_energy_threshold" default="80" />
+  <arg name="map" default="$(find wpb_home_tutorials)/maps/map.yaml" />
+  <arg name="waypoint_file" default="/home/$(env USER)/waypoints.xml" />
+  <arg name="device" default="cuda:0" />
+
+  <!--
+    下面这些参数原上游没有在这里声明，导致命令行传
+    "use_jie_lidar_loc:=false" 之类会被静默忽略、仍然按默认值启动。
+    这里补齐声明并转发给 task1_owner_search_real.launch。
+  -->
+  <arg name="start_base" default="true" />
+  <arg name="start_lidar" default="true" />
+  <arg name="start_kinect" default="true" />
+  <arg name="start_map_server" default="true" />
+  <arg name="start_amcl" default="true" />
+  <arg name="use_jie_lidar_loc" default="false" />
+  <arg name="start_move_base" default="true" />
+  <arg name="start_wp_manager" default="true" />
+  <arg name="serial_port" default="/dev/ftdi" />
+  <arg name="rplidar_port" default="/dev/rplidar" />
+
+  <param name="/asr/capture_device" value="$(arg asr_capture_device)" />
+  <param name="/asr/energy_threshold" value="$(arg asr_energy_threshold)" />
+
+  <include file="$(find wpb_task1_owner_search)/launch/task1_owner_search_real.launch">
+    <arg name="start_robot" value="true" />
+    <arg name="start_yolo" value="true" />
+    <arg name="show_yolo_viewer" value="$(arg show_yolo_viewer)" />
+    <arg name="yolo_output" value="$(arg yolo_output)" />
+    <arg name="yolo_respawn" value="$(arg yolo_respawn)" />
+    <arg name="yolo_respawn_delay" value="$(arg yolo_respawn_delay)" />
+    <arg name="viewer_respawn" value="$(arg viewer_respawn)" />
+    <arg name="start_voice" value="$(arg start_voice)" />
+    <arg name="start_asr" value="$(arg start_asr)" />
+    <arg name="start_tts" value="$(arg start_tts)" />
+    <arg name="start_sound_play" value="$(arg start_sound_play)" />
+    <arg name="asr_capture_device" value="$(arg asr_capture_device)" />
+    <arg name="asr_capture_backend" value="$(arg asr_capture_backend)" />
+    <arg name="asr_capture_source" value="$(arg asr_capture_source)" />
+    <arg name="asr_capture_volume" value="$(arg asr_capture_volume)" />
+    <arg name="asr_capture_gain" value="$(arg asr_capture_gain)" />
+    <arg name="asr_energy_threshold" value="$(arg asr_energy_threshold)" />
+    <arg name="start_task" value="false" />
+    <arg name="start_rviz" value="$(arg start_rviz)" />
+    <arg name="map" value="$(arg map)" />
+    <arg name="waypoint_file" value="$(arg waypoint_file)" />
+    <arg name="device" value="$(arg device)" />
+    <arg name="start_base" value="$(arg start_base)" />
+    <arg name="start_lidar" value="$(arg start_lidar)" />
+    <arg name="start_kinect" value="$(arg start_kinect)" />
+    <arg name="start_map_server" value="$(arg start_map_server)" />
+    <arg name="start_amcl" value="$(arg start_amcl)" />
+    <arg name="use_jie_lidar_loc" value="$(arg use_jie_lidar_loc)" />
+    <arg name="start_move_base" value="$(arg start_move_base)" />
+    <arg name="start_wp_manager" value="$(arg start_wp_manager)" />
+    <arg name="serial_port" value="$(arg serial_port)" />
+    <arg name="rplidar_port" value="$(arg rplidar_port)" />
+  </include>
+</launch>

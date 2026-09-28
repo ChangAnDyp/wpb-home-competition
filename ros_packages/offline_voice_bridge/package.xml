@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>offline_voice_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Offline Chinese speech bridge for the WPB Home robot: PiperTTS speech
+    synthesis on /voice/say, plus an optional FunASR SenseVoiceSmall
+    recognition node that publishes /voice/asr_text. Drop-in replacement for
+    the vendor package of the same name (topic contract and launch arguments
+    are kept identical).
+  </description>
+
+  <maintainer email="dyp@example.com">dyp</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>audio_common</exec_depend>
+</package>

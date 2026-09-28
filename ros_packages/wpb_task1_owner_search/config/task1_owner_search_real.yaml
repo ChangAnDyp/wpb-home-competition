@@ -1,0 +1,426 @@
+waypoint_name: living_room
+task_waypoint_names: [living_room, kitchen, bedroom, canteen]
+exit_waypoint_name: exit
+exit_waypoint_aliases: ["1"]
+rename_exit_waypoint_alias: true
+return_to_exit_when_complete: true
+waypoint_speech_names:
+  living_room: 客厅
+  kitchen: 厨房
+  bedroom: 卧室
+  canteen: 餐厅
+  exit: 出口
+waypoint_file: /home/dyp/waypoints.xml
+owner_image_path: /home/dyp/catkin_ws/src/wpb_task1_owner_search/data/owner
+
+# Real WPB Home topics. These are produced by wpb_home_bringup, rplidar_ros,
+# kinect2_bridge, and yoloworld_perception in the real launch file.
+image_topic: /kinect2/qhd/image_color_rect
+detections_topic: /perception/person_detections_2d
+points_topic: /kinect2/qhd/points
+scan_topic: /scan
+odom_topic: /odom
+cmd_vel_topic: /cmd_vel
+# Offline robot speech path. offline_voice_bridge uses PiperTTS on /voice/say
+# and faster-whisper publishes recognized text on /voice/asr_text.
+say_topic: /voice/say
+asr_topic: /voice/asr_text
+electrical_switch_state_topic: /electrical_switch/state
+pause_yolo_topic: /yoloworld/pause
+
+# Hardware-topic readiness checks. Keep these on for real robot testing so the
+# task fails early if a driver is missing instead of rotating blindly.
+require_kinect: true
+require_lidar: true
+require_odom: true
+hardware_check_timeout: 90.0
+
+# Clear stale obstacle data before sending the room goal, and retry once after
+# a navigation failure. This helps after repeated runs leave local costmaps busy.
+clear_costmaps_before_navigation: true
+retry_navigation_after_clear: true
+clear_costmaps_service: /move_base/clear_costmaps
+clear_costmaps_timeout: 5.0
+
+# Owner verification. InsightFace runs on CPU so YOLO-World can keep cuda:0.
+face_verify_enabled: true
+face_verify_required: true
+allow_unverified_owner: false
+owner_enrollment_enabled: false
+owner_enrollment_name_timeout: 15.0
+owner_enrollment_confirm_timeout: 8.0
+owner_enrollment_capture_seconds: 5.0
+owner_enrollment_sample_interval: 0.35
+owner_enrollment_min_samples: 6
+owner_enrollment_min_face_size: 70
+owner_enrollment_retries: 3
+owner_enrollment_asr_settle_seconds: 0.8
+face_auto_download: false
+face_model_name: buffalo_sc
+face_model_root: /home/dyp/.insightface
+face_ctx_id: -1
+face_det_size: 480
+face_det_thresh: 0.35
+face_accept_threshold: 0.45
+face_reject_threshold: 0.25
+face_fast_reject: true
+# Keep reference photos upright. Candidate crops are still rotated for lying people,
+# but rotating the reference set creates unstable false accepts on sideways non-owners.
+face_reference_try_rotations: false
+face_crop_padding: 0.28
+face_crop_top_ratio: 0.68
+# If the YOLO person box is taller than wide, use only the upper crop without rotation.
+# If it is wider than tall, try left/right side crops with several widths and rotated face checks.
+face_crop_lying_side_ratio: 0.50
+face_crop_lying_extra_side_ratios: [0.45, 0.65, 0.75]
+face_crop_try_rotations: true
+face_candidate_enhance: true
+# Run the primary lying-face crop first. Borderline candidates keep the full
+# multi-crop/enhancement fallback, while clearly low scores reject immediately.
+face_fast_pass_enabled: true
+face_fast_pass_reject_threshold: 0.30
+
+# Person candidate selection from YOLO-World detections.
+detection_min_score: 0.30
+detection_min_area_ratio: 0.015
+verify_top_k: 1
+verify_during_scan: true
+verify_after_scan_top_k: 1
+candidate_cooldown: 1.0
+candidate_collection_interval: 0.5
+scan_candidate_pool_size: 6
+
+# Real robot scan defaults: 180 degrees, slower than simulation for safety.
+navigate_enabled: true
+navigate_timeout: 120.0
+scan_angular_speed: -0.25
+scan_duration: 13.0
+scan_total_angle: 3.1416
+scan_timeout: 35.0
+scan_after_arrival_delay: 0.2
+scan_return_to_owner: true
+return_angular_speed: 0.25
+
+# After owner verification, try to center the owner before action recognition.
+# If centering is unstable/times out, the node skips this step silently and continues.
+center_owner_enabled: true
+center_owner_timeout: 5.0
+center_owner_tolerance: 0.06
+center_owner_angular_gain: 0.65
+center_owner_max_angular_speed: 0.30
+center_owner_lost_turn_speed: 0.10
+
+# Owner action recognition. YOLO-Pose gets the first decision on dynamic
+# waving/fall-transition actions. If it does not find either dynamic action,
+# Qwen vision runs through the local Ollama service for sitting, lying, and
+# already-fallen action recognition, with the existing point-cloud support
+# analysis retained.
+action_recognition_enabled: true
+action_core_path: /home/dyp/catkin_ws/src/offline_voice_bridge/scripts/qwen_action_recognition_node.py
+action_llm_url: http://127.0.0.1:11434/api/chat
+# 上游写的是 qwen3.5:0.8b，但那是个**纯文本模型，不支持图片输入**
+# （manifest 只有一个模型层、没有 vision projector，ollama show 也只列出
+# completion/tools，没有 vision）。动作识别必须用视觉模型，这里换成
+# qwen3-vl:2b-instruct（2.1B / Q4_K_M，实测 capabilities 含 vision）。
+action_llm_model: qwen3-vl:2b-instruct
+action_llm_timeout: 45.0
+action_llm_keep_alive: 30m
+action_llm_max_tokens: 20
+action_llm_num_ctx: 4096
+# 本机实测（GTX 1650 4GB，Vulkan 后端）：
+#   CPU(num_gpu=0)  冷启动 22.4s / 热推理 19.2s
+#   GPU(num_gpu=-1) 冷启动 12.0s / 热推理  8.0s
+# 但 YOLO-World 常驻显存，4GB 卡上让 2GB 的视觉模型一起上 GPU 有 OOM 风险，
+# 所以默认仍走 CPU（19.2s < action_llm_timeout 45s，够用）。
+# 若确认显存有余量，可改成 -1 换取约 2.4 倍加速。
+action_llm_num_gpu: 0
+# 上游写的是 /home/ubuntu20/catkin_ws/src/wpr_task1_owner_search/...，
+# 那个目录在本机不存在。这里指向本机实际存放的姿势模型。
+action_model_path: /home/dyp/models/yolo11n-pose.pt
+action_device: cpu
+action_require_gpu: false
+action_imgsz: 416
+action_conf: 0.25
+action_iou: 0.45
+action_half: false
+action_sample_seconds: 5.0
+action_sample_rate: 3.0
+action_frame_count: 9
+action_llm_frame_count: 3
+action_jpeg_quality: 65
+action_image_max_width: 320
+action_warmup_retries: 3
+action_warmup_retry_delay: 2.0
+action_warmup_wait_timeout: 30.0
+action_pose_enabled: true
+action_pointcloud_enabled: true
+action_pointcloud_camera_height: 0.85
+action_pointcloud_ground_height_limit: 0.35
+action_pointcloud_furniture_height_limit: 0.42
+action_pointcloud_max_age: 1.0
+action_pointcloud_stride: 8
+action_pointcloud_min_samples: 30
+action_pointcloud_roi_padding: 0.20
+action_pointcloud_anchor_radius: 14.0
+action_pointcloud_depth_percentile: 20.0
+action_pointcloud_surface_band: 0.25
+action_pointcloud_local_ground_padding: 0.85
+action_pointcloud_elevated_delta: 0.24
+action_pointcloud_frame_mode: auto
+action_min_keypoint_conf: 0.25
+action_max_det: 4
+action_pause_yolo: true
+action_yolo_pause_settle_seconds: 0.35
+action_use_owner_roi: false
+action_roi_padding: 0.55
+action_min_pose_samples: 5
+action_static_required_ratio: 0.65
+# The following pose-helper parameters are retained for compatibility with
+# existing parameter files. The active pose helper is the validated one from
+# offline_voice_bridge and uses its own thresholds.
+action_sitting_min_torso_verticality: 0.45
+action_sitting_knee_angle_max: 150.0
+action_sitting_knee_hip_y_ratio: 0.45
+action_sitting_ankle_hip_y_ratio: 0.62
+action_sitting_thigh_horizontal_ratio: 0.65
+action_sitting_compact_aspect_min: 0.65
+action_sitting_support_score: 0.90
+action_sitting_relaxed_ratio: 0.60
+# Retained legacy action parameters; active dynamic fall-transition logic comes
+# from the validated YOLO-Pose helper in the Qwen action core.
+action_fall_center_drop: 0.06
+action_fall_torso_drop: 0.20
+action_fall_aspect_gain: 0.25
+action_fall_lie_ratio_gain: 0.35
+action_fall_late_lie_ratio: 0.45
+action_fall_height_shrink_ratio: 0.82
+action_fall_early_upright_ratio: 0.50
+action_fall_early_lie_ratio_max: 0.25
+action_fall_static_lie_ratio: 0.65
+action_fall_early_det_aspect_max: 1.10
+action_fall_static_det_aspect_min: 1.20
+action_fall_min_transition_signals: 2
+# Kept for compatibility with older parameter files. Surface classification is
+# now performed by the static-action Qwen/point-cloud path after the dynamic
+# YOLO-Pose gate.
+already_fallen_surface_labels: [lying, unknown]
+lying_surface_classification_enabled: true
+lying_surface_camera_height: 0.85
+lying_ground_max_surface_height: 0.35
+lying_furniture_min_surface_height: 0.42
+lying_ground_bbox_bottom_ratio: 0.88
+lying_ground_bbox_center_ratio: 0.62
+action_report_standing: false
+action_speech_hold: 1.2
+
+# Real robot response after a waving owner is detected. This samples the Kinect
+# organized point cloud inside the verified owner's 2D bbox and uses lidar only
+# as a forward safety guard.
+approach_on_waving_enabled: true
+approach_timeout: 25.0
+approach_linear_speed: 0.18
+approach_linear_gain: 0.25
+approach_min_linear_speed: 0.06
+# If the robot is already near the owner and becomes stopped/very slow, accept
+# the approach as complete so the next action (arm/voice) starts promptly.
+approach_slow_finish_enabled: true
+approach_slow_finish_tolerance: 0.05
+approach_slow_finish_linear_speed: 0.03
+approach_slow_finish_cycles: 3
+approach_odom_speed_max_age: 0.6
+# Use move_base for final owner approach / extra-close moves so local costmaps
+# and wpbh_local_planner can avoid obstacles instead of blindly publishing cmd_vel.
+approach_navigation_enabled: true
+approach_navigation_frame: map
+approach_navigation_base_frame: base_footprint
+approach_navigation_tf_timeout: 0.6
+approach_navigation_timeout: 18.0
+approach_navigation_server_timeout: 3.0
+approach_navigation_retry_after_clear: true
+approach_navigation_clear_costmaps_before_goal: false
+approach_navigation_min_distance: 0.05
+approach_navigation_lidar_guard_enabled: false
+approach_navigation_stuck_timeout: 4.0
+approach_navigation_stuck_min_progress: 0.05
+approach_navigation_stuck_linear_speed: 0.025
+approach_direct_fallback_enabled: false
+# Waving-only dynamic standoff goals. The robot samples nearby side/front points
+# around the owner and sends the first plannable move_base goal. Keep candidates
+# around 40-50cm so the robot stays close enough for interaction without touching feet.
+waving_approach_candidate_enabled: true
+waving_approach_min_owner_distance: 0.45
+waving_approach_max_owner_distance: 0.50
+waving_approach_candidate_distances: [0.45, 0.48, 0.50]
+waving_approach_candidate_angles_deg: [65, -65, 95, -95, 35, -35, 0, 125, -125]
+waving_approach_plan_check: true
+waving_approach_plan_service: /move_base/make_plan
+waving_approach_plan_tolerance: 0.20
+waving_approach_safety_radius: 0.48
+waving_approach_still_duration: 0.8
+waving_approach_plan_detour_ratio: 2.0
+waving_approach_plan_detour_margin: 0.8
+waving_approach_plan_turn_limit: 4.5
+waving_approach_retry_after_clear: false
+approach_angular_gain: 0.45
+approach_max_angular_speed: 0.25
+approach_stop_distance: 0.45
+approach_standoff_distance: 0.45
+approach_distance_tolerance: 0.05
+approach_fast_finish_tolerance: 0.05
+approach_bearing_tolerance: 0.06
+approach_forward_bearing_limit: 0.45
+approach_arrival_stable_cycles: 1
+approach_missing_data_grace: 0.7
+approach_missing_linear_scale: 0.35
+approach_command_smoothing: 0.45
+approach_center_tolerance: 0.12
+approach_target_height_ratio: 0.55
+approach_lost_turn_speed: 0.10
+approach_front_scan_degrees: 25.0
+approach_scan_max_age: 0.8
+approach_require_lidar: false
+approach_lidar_stop_distance: 0.55
+approach_lidar_margin: 0.08
+approach_pointcloud_mode: auto
+approach_pointcloud_max_age: 1.0
+approach_pointcloud_min_samples: 30
+approach_pointcloud_stride: 8
+approach_pointcloud_roi_x_margin: 0.25
+approach_pointcloud_roi_y_min_ratio: 0.15
+approach_pointcloud_roi_y_max_ratio: 0.85
+approach_pointcloud_depth_percentile: 35.0
+approach_pointcloud_surface_band: 0.30
+approach_min_depth: 0.35
+approach_max_depth: 5.0
+approach_help_prompt: "请问您需要什么帮助？"
+# Hold briefly after publishing the help prompt so delayed TTS can finish before
+# the robot continues to the next waypoint.
+waving_help_pause_seconds: 3.0
+
+# Real robot response after a fallen / lying / sitting owner is detected. Unlike
+# waving approach, this captures one Kinect point-cloud position before moving,
+# then uses relative move_base navigation by default, without requiring repeated
+# camera detections while moving. This avoids losing the owner when the target
+# leaves the camera and still lets local costmaps avoid obstacles.
+fall_approach_enabled: true
+fall_approach_action_labels: [sudden_fall, fallen, falling, lying_ground, lying, sitting]
+fall_approach_position_sample_seconds: 0.9
+fall_approach_min_position_samples: 2
+fall_approach_standoff_distance: 0.75
+fall_approach_distance_tolerance: 0.10
+fall_approach_fast_finish_tolerance: 0.16
+fall_approach_linear_speed: 0.14
+fall_approach_min_linear_speed: 0.05
+fall_approach_linear_gain: 0.25
+fall_approach_turn_timeout: 8.0
+fall_approach_drive_timeout: 18.0
+fall_approach_max_travel_distance: 1.50
+fall_approach_lidar_stop_distance: 0.55
+fall_approach_lidar_margin: 0.08
+fall_approach_extra_close_enabled: true
+fall_approach_extra_close_distance: 0.25
+fall_approach_extra_close_speed: 0.08
+fall_approach_extra_close_timeout: 4.0
+fall_approach_extra_close_finish_tolerance: 0.06
+
+# Arm motion after reaching a fallen owner. The new `fallen` and `sudden_fall`
+# labels are mapped into this existing safety behavior.
+# Uses the same
+# /wpb_home/mani_ctrl JointState interface as wpb_home_python3/scripts/mani_ctrl.py:
+# name=['lift','gripper'], position[0]=lift height, position[1]=gripper gap.
+fall_assist_arm_enabled: true
+fall_assist_arm_action_labels: [sudden_fall, fallen, falling, lying_ground]
+mani_ctrl_topic: /wpb_home/mani_ctrl
+fall_assist_arm_extend_lift: 0.50
+fall_assist_arm_extend_gripper: 0.12
+fall_assist_arm_retract_lift: 0.0
+fall_assist_arm_retract_gripper: 0.12
+fall_assist_arm_lift_velocity: 0.5
+fall_assist_arm_gripper_velocity: 5.0
+fall_assist_arm_extend_wait: 3.0
+fall_assist_arm_hold_seconds: 4.0
+fall_assist_arm_retract_wait: 3.0
+fall_assist_arm_completion_wait: 1.0
+fall_assist_arm_command_rate: 5.0
+
+# After a normal sitting or elevated lying owner has been approached, ask for
+# an electrical-switch command. The state is recorded and published as the
+# string on/off/unknown; connect a real switch driver to this topic separately.
+electrical_switch_instruction_enabled: true
+electrical_switch_instruction_source: direct_asr
+electrical_switch_script_path: /home/dyp/catkin_ws/src/wpb_task1_owner_search/tools/local_switch_command_test.py
+electrical_switch_script_python: python3
+electrical_switch_script_until_result: true
+electrical_switch_instruction_timeout: 0.0
+electrical_switch_instruction_window_seconds: 5.0
+electrical_switch_instruction_asr_settle_seconds: 0.2
+electrical_switch_instruction_max_empty_windows: 0
+electrical_switch_prompt: "请指示。"
+electrical_switch_prompt_hold: 1.0
+electrical_switch_ready_ding_enabled: true
+electrical_switch_ready_ding_wav: /dev/shm/task1_switch_ready_ding.wav
+electrical_switch_ready_ding_frequency: 880.0
+electrical_switch_ready_ding_duration: 0.16
+electrical_switch_ready_ding_volume: 0.65
+electrical_switch_pause_yolo_during_voice: true
+electrical_switch_pause_yolo_settle_seconds: 0.15
+electrical_switch_script_filter_output: true
+electrical_switch_ready_ding_player: aplay
+electrical_switch_ready_ding_speaker_device: default
+electrical_switch_asr_capture_device: default
+electrical_switch_asr_sample_rate: 16000
+electrical_switch_asr_channels: 1
+# 直连 ASR 引擎：sensevoice（本机已装 funasr + SenseVoiceSmall，中文效果好）
+#                 / faster_whisper（上游默认，但本机未安装该包）
+#                 / auto（先试 SenseVoice，失败再退回 faster-whisper）
+electrical_switch_asr_engine: sensevoice
+electrical_switch_asr_sensevoice_model_path: /home/dyp/models/SenseVoiceSmall
+electrical_switch_asr_sensevoice_use_itn: true
+# 下面两项只在回退到 faster-whisper 时才用得到
+electrical_switch_asr_model_path: /home/dyp/catkin_ws/src/offline_voice_bridge/models/whisper/faster-whisper-small
+electrical_switch_asr_hf_endpoint: https://huggingface.co
+electrical_switch_asr_device: cpu
+electrical_switch_asr_compute_type: int8
+electrical_switch_asr_language: zh
+electrical_switch_asr_beam_size: 1
+electrical_switch_asr_vad_filter: false
+electrical_switch_asr_no_speech_threshold: 0.8
+electrical_switch_asr_keep_wav: false
+electrical_switch_asr_wav_dir: /dev/shm
+electrical_switch_asr_transcribe_from_memory: true
+electrical_switch_asr_input_gain: 3.0
+electrical_switch_asr_auto_gain_target_peak: 0.70
+electrical_switch_asr_max_gain: 8.0
+electrical_switch_preload_enabled: true
+electrical_switch_preload_wait_before_prompt: true
+electrical_switch_preload_wait_timeout: 20.0
+electrical_switch_ollama_url: http://127.0.0.1:11434/api/chat
+electrical_switch_ollama_enabled: true
+electrical_switch_ollama_model: qwen3-vl:2b-instruct
+electrical_switch_ollama_autoselect_model: true
+# 开关指令只做文本分类，用同一个已下载的模型即可，避免额外拉模型。
+electrical_switch_ollama_model_fallbacks: [qwen3.5:0.8b]
+electrical_switch_ollama_tags_timeout: 2.0
+electrical_switch_ollama_num_gpu: 0
+electrical_switch_ollama_timeout: 6.0
+electrical_switch_ollama_keep_alive: 10m
+electrical_switch_ollama_max_tokens: 20
+electrical_switch_ollama_warmup_enabled: true
+electrical_switch_ollama_warmup_timeout: 45.0
+electrical_switch_ollama_warmup_retries: 3
+electrical_switch_ollama_warmup_retry_delay: 5.0
+electrical_switch_ollama_failure_cooldown: 60.0
+electrical_switch_fast_keyword_first: true
+electrical_switch_reply_on: "好的，已开启电气开关。"
+electrical_switch_reply_off: "好的，已关闭电气开关。"
+electrical_switch_reply_unknown: "抱歉，我没有听出开关指令。"
+
+speak_on_start: true
+speak_on_arrival: false
+speak_on_owner_found: true
+speak_on_finish: true
+say_wait_for_subscribers: true
+say_wait_timeout: 5.0
+say_repeat_count: 1
+say_repeat_interval: 0.25
+say_after_publish_delay: 1.0

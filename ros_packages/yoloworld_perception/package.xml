@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>yoloworld_perception</name>
+  <version>0.1.0</version>
+  <description>
+    模型资源包（本机适配版）。
+    上游 wpb_task1_owner_search 的 launch 文件只用 $(find yoloworld_perception)
+    来定位 YOLO-World 权重文件，推理脚本 yoloworld_async.py 已经内置在
+    wpb_task1_owner_search 包里，所以这里只需要放模型。
+  </description>
+
+  <maintainer email="dyp@example.com">dyp</maintainer>
+  <license>AGPL-3.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+</package>

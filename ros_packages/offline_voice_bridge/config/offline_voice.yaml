@@ -1,0 +1,24 @@
+# offline_voice_bridge 参数参考（launch 文件里已内置同样的默认值）
+
+# 语音合成（Piper）
+say_topic: /voice/say
+piper_binary: ~/piper/piper/piper
+voice_model: ~/piper/voices/zh_CN-huayan-medium.onnx
+player: aplay
+# 留空表示用系统默认播放设备。若默认设备是 HDMI 而没有声音，
+# 用 aplay -l 查到实际声卡后填，例如 plughw:CARD=Generic_1,DEV=0
+speaker_device: ""
+# 语速：>1 更慢，<1 更快
+length_scale: 1.0
+# 合成的 wav 放哪，默认内存盘
+tmp_dir: /dev/shm
+keep_wav: false
+
+# 语音识别（可选，仅 /voice/asr_text 节点用）
+asr_topic: /voice/asr_text
+capture_device: plughw:CARD=Generic_1,DEV=0
+energy_threshold: 300
+window_seconds: 4.0
+model_path: ~/models/SenseVoiceSmall
+language: zh
+device: cpu

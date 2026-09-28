@@ -1,0 +1,178 @@
+<launch>
+  <arg name="start_robot" default="true" />
+  <arg name="start_yolo" default="true" />
+  <arg name="show_yolo_viewer" default="true" />
+  <arg name="yolo_output" default="log" />
+  <arg name="yolo_respawn" default="true" />
+  <arg name="yolo_respawn_delay" default="2.0" />
+  <arg name="viewer_respawn" default="true" />
+  <arg name="start_voice" default="true" />
+  <arg name="start_asr" default="false" />
+  <arg name="start_tts" default="true" />
+  <arg name="start_sound_play" default="true" />
+  <!-- PulseAudio owns the Xbox capture device on this robot. Use the shared
+       default PCM instead of opening the ALSA device exclusively. -->
+  <arg name="asr_capture_device" default="default" />
+  <arg name="asr_capture_backend" default="pulse" />
+  <arg name="asr_capture_source" default="" />
+  <arg name="asr_capture_volume" default="150%" />
+  <arg name="asr_capture_gain" default="2.0" />
+  <arg name="asr_energy_threshold" default="80" />
+  <arg name="start_task" default="true" />
+  <arg name="start_rviz" default="true" />
+
+  <arg name="start_base" default="true" />
+  <arg name="start_lidar" default="true" />
+  <arg name="start_kinect" default="true" />
+  <arg name="start_map_server" default="true" />
+  <arg name="start_amcl" default="true" />
+  <!-- 本机没有 jie_ware，默认走 AMCL。详见 wpb_real_navigation.launch 的说明。 -->
+  <arg name="use_jie_lidar_loc" default="false" />
+  <arg name="start_move_base" default="true" />
+  <arg name="start_wp_manager" default="true" />
+
+  <arg name="serial_port" default="/dev/ftdi" />
+  <arg name="rplidar_port" default="/dev/rplidar" />
+  <arg name="map" default="$(find wpb_home_tutorials)/maps/map.yaml" />
+  <arg name="waypoint_file" default="/home/$(env USER)/waypoints.xml" />
+  <arg name="waypoint_name" default="living_room" />
+  <arg name="task_waypoint_names" default="living_room,kitchen,bedroom,canteen" />
+  <arg name="exit_waypoint_name" default="exit" />
+  <arg name="exit_waypoint_aliases" default="1" />
+  <arg name="navigate_enabled" default="true" />
+
+  <arg name="image_topic" default="/kinect2/qhd/image_color_rect" />
+  <arg name="detections_topic" default="/perception/person_detections_2d" />
+  <arg name="points_topic" default="/kinect2/qhd/points" />
+  <arg name="yolo_debug_image_topic" default="/perception/yoloworld/debug_image" />
+  <arg name="yolo_imgsz" default="384" />
+  <arg name="yolo_process_every_n" default="3" />
+  <arg name="yolo_warmup" default="true" />
+  <arg name="yolo_publish_debug" default="false" />
+  <arg name="yolo_display_fps" default="15.0" />
+  <arg name="yolo_viewer_window_retry_seconds" default="2.0" />
+  <arg name="owner_image_path" default="$(find wpb_task1_owner_search)/data/owner" />
+  <arg name="owner_enrollment_enabled" default="false" />
+  <arg name="owner_enrollment_capture_seconds" default="5.0" />
+  <arg name="owner_enrollment_min_samples" default="6" />
+  <arg name="device" default="cuda:0" />
+  <arg name="action_llm_url" default="http://127.0.0.1:11434/api/chat" />
+  <!-- 注意：这个 <arg> 会通过 <param name="action_llm_model"> 覆盖
+       config/task1_owner_search_real.yaml 里的同名项，所以两边必须一致。
+       上游写的是 qwen3.5:0.8b（纯文本模型，不支持图片），这里改成
+       带 vision 能力的 qwen3-vl:2b-instruct。 -->
+  <arg name="action_llm_model" default="qwen3-vl:2b-instruct" />
+  <arg name="action_sample_seconds" default="5.0" />
+  <arg name="action_frame_count" default="9" />
+  <arg name="action_llm_frame_count" default="3" />
+  <arg name="action_llm_num_ctx" default="4096" />
+  <arg name="action_llm_num_gpu" default="0" />
+  <arg name="action_image_max_width" default="320" />
+  <arg name="action_pause_yolo" default="true" />
+  <arg name="action_yolo_pause_settle_seconds" default="0.35" />
+  <arg name="action_use_owner_roi" default="false" />
+  <arg name="action_speech_hold" default="1.2" />
+
+  <!-- Keep ASR tuning visible before the voice launch loads its nodes. -->
+  <param name="/asr/capture_device" value="$(arg asr_capture_device)" />
+  <param name="/asr/energy_threshold" value="$(arg asr_energy_threshold)" />
+
+  <group if="$(arg start_robot)">
+    <include file="$(find wpb_task1_owner_search)/launch/wpb_real_navigation.launch">
+      <arg name="start_base" value="$(arg start_base)" />
+      <arg name="start_lidar" value="$(arg start_lidar)" />
+      <arg name="start_kinect" value="$(arg start_kinect)" />
+      <arg name="start_map_server" value="$(arg start_map_server)" />
+      <arg name="start_amcl" value="$(arg start_amcl)" />
+      <arg name="use_jie_lidar_loc" value="$(arg use_jie_lidar_loc)" />
+      <arg name="start_move_base" value="$(arg start_move_base)" />
+      <arg name="start_wp_manager" value="$(arg start_wp_manager)" />
+      <arg name="start_rviz" value="$(arg start_rviz)" />
+      <arg name="serial_port" value="$(arg serial_port)" />
+      <arg name="rplidar_port" value="$(arg rplidar_port)" />
+      <arg name="map" value="$(arg map)" />
+      <arg name="waypoints" value="$(arg waypoint_file)" />
+    </include>
+  </group>
+
+  <group if="$(arg start_yolo)">
+    <node pkg="wpb_task1_owner_search" type="yoloworld_async.py" name="yoloworld"
+          output="$(arg yolo_output)" respawn="$(arg yolo_respawn)"
+          respawn_delay="$(arg yolo_respawn_delay)">
+      <env name="PYTORCH_CUDA_ALLOC_CONF" value="expandable_segments:True" />
+      <param name="image_topic" value="$(arg image_topic)" />
+      <param name="model_path" value="$(find yoloworld_perception)/models/yolov8s-world-person.pt" />
+      <param name="device" value="$(arg device)" />
+      <param name="require_gpu" value="true" />
+      <param name="imgsz" value="$(arg yolo_imgsz)" />
+      <param name="conf" value="0.30" />
+      <param name="iou" value="0.45" />
+      <param name="max_det" value="5" />
+      <param name="process_every_n" value="$(arg yolo_process_every_n)" />
+      <param name="classes" value="person" />
+      <param name="warmup" value="$(arg yolo_warmup)" />
+      <param name="publish_debug" value="$(arg yolo_publish_debug)" />
+      <remap from="~detections" to="$(arg detections_topic)" />
+      <remap from="~debug_image" to="$(arg yolo_debug_image_topic)" />
+    </node>
+  </group>
+
+  <node if="$(arg show_yolo_viewer)" pkg="wpb_task1_owner_search"
+        type="yoloworld_debug_viewer_stable.py" name="yoloworld_bbox_debug_viewer"
+        output="$(arg yolo_output)" respawn="$(arg viewer_respawn)"
+        respawn_delay="$(arg yolo_respawn_delay)">
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="detections_topic" value="$(arg detections_topic)" />
+    <param name="show_raw" value="false" />
+    <param name="show_debug" value="true" />
+    <param name="display_fps" value="$(arg yolo_display_fps)" />
+    <param name="window_retry_seconds" value="$(arg yolo_viewer_window_retry_seconds)" />
+    <param name="debug_window" value="Owner YOLO-Person Box Real" />
+  </node>
+
+  <group if="$(arg start_voice)">
+    <!-- Offline robot speech chain: PiperTTS listens on /voice/say and
+         faster-whisper publishes recognized text on /voice/asr_text. -->
+    <include file="$(find offline_voice_bridge)/launch/offline_voice_zh.launch">
+      <arg name="start_asr" value="$(arg start_asr)" />
+      <arg name="start_tts" value="$(arg start_tts)" />
+      <arg name="start_sound_play" value="$(arg start_sound_play)" />
+      <arg name="asr_capture_device" value="$(arg asr_capture_device)" />
+      <arg name="asr_capture_backend" value="$(arg asr_capture_backend)" />
+      <arg name="asr_capture_source" value="$(arg asr_capture_source)" />
+      <arg name="asr_capture_volume" value="$(arg asr_capture_volume)" />
+      <arg name="asr_capture_gain" value="$(arg asr_capture_gain)" />
+      <arg name="asr_energy_threshold" value="$(arg asr_energy_threshold)" />
+    </include>
+  </group>
+
+  <node if="$(arg start_task)" pkg="wpb_task1_owner_search" type="task1_find_owner_real.py" name="task1_find_owner_real" output="screen">
+    <env name="CUDA_VISIBLE_DEVICES" value="" />
+    <rosparam command="load" file="$(find wpb_task1_owner_search)/config/task1_owner_search_real.yaml" />
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="detections_topic" value="$(arg detections_topic)" />
+    <param name="points_topic" value="$(arg points_topic)" />
+    <param name="owner_image_path" value="$(arg owner_image_path)" />
+    <param name="owner_enrollment_enabled" value="$(arg owner_enrollment_enabled)" />
+    <param name="owner_enrollment_capture_seconds" value="$(arg owner_enrollment_capture_seconds)" />
+    <param name="owner_enrollment_min_samples" value="$(arg owner_enrollment_min_samples)" />
+    <param name="waypoint_file" value="$(arg waypoint_file)" />
+    <param name="waypoint_name" value="$(arg waypoint_name)" />
+    <param name="task_waypoint_names" value="$(arg task_waypoint_names)" />
+    <param name="exit_waypoint_name" value="$(arg exit_waypoint_name)" />
+    <param name="exit_waypoint_aliases" value="$(arg exit_waypoint_aliases)" />
+    <param name="navigate_enabled" value="$(arg navigate_enabled)" />
+    <param name="action_llm_url" value="$(arg action_llm_url)" />
+    <param name="action_llm_model" value="$(arg action_llm_model)" />
+    <param name="action_sample_seconds" value="$(arg action_sample_seconds)" />
+    <param name="action_frame_count" value="$(arg action_frame_count)" />
+    <param name="action_llm_frame_count" value="$(arg action_llm_frame_count)" />
+    <param name="action_llm_num_ctx" value="$(arg action_llm_num_ctx)" />
+    <param name="action_llm_num_gpu" value="$(arg action_llm_num_gpu)" />
+    <param name="action_image_max_width" value="$(arg action_image_max_width)" />
+    <param name="action_pause_yolo" value="$(arg action_pause_yolo)" />
+    <param name="action_yolo_pause_settle_seconds" value="$(arg action_yolo_pause_settle_seconds)" />
+    <param name="action_use_owner_roi" value="$(arg action_use_owner_roi)" />
+    <param name="action_speech_hold" value="$(arg action_speech_hold)" />
+  </node>
+</launch>
