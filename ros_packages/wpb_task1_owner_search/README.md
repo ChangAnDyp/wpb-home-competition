@@ -293,7 +293,7 @@ Do not use that setting in the final competition flow because the robot may acce
 After InsightFace confirms the owner, the robot tries to center the owner in the Kinect image. If centering is unstable or times out, it silently skips centering, says `识别中。`, samples `/kinect2/qhd/image_color_rect` for five seconds, and announces the detected action.
 
 The action recognizer uses the verified local Qwen vision logic from
-`offline_voice_bridge/scripts/qwen_action_recognition_node.py` together with its
+`wpb_task1_owner_search/scripts/qwen_action_recognition_node.py` together with its
 YOLO-pose helper. It samples nine full-camera frames over five seconds and runs
 YOLO-pose first on all nine frames. A pose-confirmed `waving` or
 `sudden_fall` result is returned directly without sending the action frames to

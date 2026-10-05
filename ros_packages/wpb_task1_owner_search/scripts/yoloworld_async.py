@@ -171,6 +171,15 @@ class AsyncYoloWorldNode:
                     and not rospy.is_shutdown()
                 ):
                     self.condition.wait(timeout=0.5)
+                    # 容错：如果暂停我们的节点（任务节点）已经退出、
+                    # 来不及发 resumed 消息，就自动恢复推理。
+                    # 否则后面所有依赖人体检测的节点都会拿到空数据
+                    # （实测踩过：owner_voice_reid_test 报 detections=False）。
+                    if self.paused and self.pause_sub.get_num_connections() == 0:
+                        self.paused = False
+                        rospy.logwarn(
+                            "YOLO-World pause publisher disappeared; auto-resumed inference"
+                        )
                 if self.stop_event.is_set() or rospy.is_shutdown():
                     return
                 pending_image = self.pending_image

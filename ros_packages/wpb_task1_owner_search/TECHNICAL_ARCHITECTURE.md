@@ -61,7 +61,7 @@ wpb_task1_owner_search/
 
 3. 人脸与动作识别：
    - `InsightFace`：主人脸识别和特征库初始化；
-   - `offline_voice_bridge/scripts/qwen_action_recognition_node.py`：提供 Qwen 动作识别能力与 YOLO-Pose/PointCloud Ground Analyzer。
+   - `wpb_task1_owner_search/scripts/qwen_action_recognition_node.py`：提供 Qwen 动作识别能力与 YOLO-Pose/PointCloud Ground Analyzer。
 
 因此，从工程层面看，这个包不依赖单脚本，而是取构成 ROS 系统的多个强耦合部件：导航、定位、图像、点云、语音、ASR、动作识别与开关控制。
 
@@ -147,7 +147,7 @@ face_verify_required: true
 owner_image_path: /home/dyp/catkin_ws/src/wpb_task1_owner_search/data/owner
 face_model_name: buffalo_sc
 action_recognition_enabled: true
-action_core_path: /home/dyp/catkin_ws/src/offline_voice_bridge/scripts/qwen_action_recognition_node.py
+action_core_path: /home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py
 action_model_path: /home/dyp/catkin_ws/src/wpr_task1_owner_search/models/pose/yolo11n-pose.pt
 ```
 

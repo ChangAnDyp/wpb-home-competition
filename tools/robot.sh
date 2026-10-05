@@ -2,16 +2,17 @@
 # 启智机器人统一入口脚本 —— 不用再开多个终端手动敲命令
 #
 # 用法：
-#   bash ~/competition/robot.sh stack     只启动机器人栈（前台，Ctrl+C 停止）
-#   bash ~/competition/robot.sh enroll    栈放后台 + 启动主人注册（前台）
-#   bash ~/competition/robot.sh task      栈放后台 + 启动任务节点（前台）
-#   bash ~/competition/robot.sh once      一条 roslaunch 启动全部（含任务节点）
-#   bash ~/competition/robot.sh stop      停掉所有本脚本启动的进程
-#   bash ~/competition/robot.sh status    查看当前状态（节点/话题/Ollama）
+#   bash ~/catkin_ws/competition/robot.sh stack     只启动机器人栈（前台，Ctrl+C 停止）
+#   bash ~/catkin_ws/competition/robot.sh enroll    栈放后台 + 启动主人注册（前台）
+#   bash ~/catkin_ws/competition/robot.sh task      栈放后台 + 启动任务节点（前台）
+#   bash ~/catkin_ws/competition/robot.sh once      一条 roslaunch 启动全部（含任务节点）
+#   bash ~/catkin_ws/competition/robot.sh stop      停掉所有本脚本启动的进程
+#   bash ~/catkin_ws/competition/robot.sh status    查看当前状态（节点/话题/Ollama）
 #
 # 可选环境变量：
 #   OWNER_COUNT=3     注册人数（enroll 模式，默认 1）
 #   NAVIGATE=1        是否启用导航（task 模式，默认 0=不导航）
+#   ENROLL=1          task 模式下启用【现场注册主人】而不是读照片
 #   SHOW_RVIZ=1       是否开 RViz（默认 0）
 #   NO_OLLAMA=1       跳过启动 Ollama
 
@@ -52,6 +53,11 @@ sig = signal.SIGKILL if str(sys.argv[1]).upper() == "KILL" else signal.SIGINT
 targets = {
     "roslaunch", "rosmaster", "rosout", "rosnode", "rostopic",
     "wpb_home_core", "wpb_home_lidar_filter", "kinect2_bridge",
+    # nodelet 必须单独列上：kinect2_bridge / depth_image_proc 都是通过
+    # nodelet manager 加载的，进程名其实是 "nodelet"。
+    # 漏掉它会导致残留的 nodelet manager 一直占着 Kinect 的 USB 接口，
+    # 下次启动时报 "did not claim interface 0" 然后初始化失败。
+    "nodelet",
     "rplidarNode", "map_server", "move_base", "amcl", "wp_manager",
     "robot_state_publisher", "offline_tts_node.py", "offline_asr_node.py",
     "yoloworld_async.py", "yoloworld_debug_viewer_stable.py",
@@ -150,6 +156,7 @@ rviz_arg() {
 }
 
 start_stack_background() {
+    local extra_args="${1:-}"
     if stack_running; then
         say "机器人栈已在运行（pid $(cat "$PID_FILE")）"
         return 0
@@ -166,7 +173,7 @@ start_stack_background() {
     setsid nohup bash -c "
         source /opt/ros/noetic/setup.bash
         source \$HOME/catkin_ws/devel/setup.bash
-        exec roslaunch $PKG task1_owner_search_bringup.launch $rviz
+        exec roslaunch $PKG task1_owner_search_bringup.launch $rviz $extra_args
     " > "$STACK_LOG" 2>&1 &
 
     echo $! > "$PID_FILE"
@@ -259,7 +266,9 @@ case "${1:-}" in
 
   enroll)
     start_ollama || true
-    start_stack_background
+    # 注册工具自己会启动一整套语音（TTS+ASR），所以栈里不要再起语音，
+    # 否则会出现两个同名节点互相顶掉。
+    start_stack_background "start_voice:=false"
     wait_for_stack 180 || true
     say "启动主人注册（注册 $OWNER_COUNT 位；不导航）"
     say "注册完成后进入识别循环，站到镜头前应听到自己的名字"
@@ -270,15 +279,39 @@ case "${1:-}" in
 
   task)
     start_ollama || true
-    start_stack_background
-    wait_for_stack 180 || true
-    if [ "$NAVIGATE" = "1" ]; then
-        say "启动任务节点（含导航）"
-        run_foreground roslaunch "$PKG" task1_owner_search_task_only.launch
+    # 现场注册需要 ASR 在线。关键点：start_asr 只有在 start_voice=true 时才有效，
+    # 而 bringup.launch 里 start_voice 默认就是 true、start_asr 默认 false，
+    # 所以这里必须显式把 start_asr 打开，让【栈】去启动 ASR；
+    # 任务节点那边保持 start_voice=false，避免重复启动语音节点。
+    if [ "${ENROLL:-0}" = "1" ]; then
+        start_stack_background "start_asr:=true"
     else
-        say "启动任务节点（不导航，原地测识别与交互）"
-        run_foreground roslaunch "$PKG" task1_owner_search_task_only.launch navigate_enabled:=false
+        start_stack_background
     fi
+    wait_for_stack 180 || true
+    task_args=()
+    [ "$NAVIGATE" = "1" ] && task_args+=(navigate_enabled:=true) || task_args+=(navigate_enabled:=false)
+    if [ "${ENROLL:-0}" = "1" ]; then
+        # 现场注册：不读 data/owner 照片，启动时语音问名字并采集人脸
+        task_args+=(owner_enrollment_enabled:=true)
+        say "启动任务节点【现场注册模式】——不会读取 data/owner 的照片"
+        say "画面里站一个人，听到“请在我前方说出您的名字”后报名字"
+        # 开跑前确认 ASR 真的在线，避免任务节点因为等不到发布者而直接退出
+        if ! timeout 10 rostopic info /voice/asr_text 2>/dev/null | sed -n '/Publishers:/,$p' | grep -q '\*'; then
+            warn "警告：/voice/asr_text 还没有发布者，现场注册会立刻失败"
+            warn "  最常见原因：栈是用【不带 start_asr】的方式启动的（比如先跑过 stack 模式）"
+            warn "  处理：先执行 bash $0 stop，再重新跑本命令"
+            warn "  如果是别的机器/进程占着麦克风，也会出现同样现象"
+        fi
+    else
+        say "启动任务节点（身份来自 data/owner 里的照片）"
+    fi
+    [ "$NAVIGATE" = "1" ] || say "导航已关闭，机器人会原地扫描找人"
+    run_foreground roslaunch "$PKG" task1_owner_search_task_only.launch "${task_args[@]}"
+    echo
+    say "任务节点已退出。注意：机器人栈仍在后台运行（方便你重新跑任务）"
+    say "  想重新跑任务：再执行一次同样的命令即可"
+    say "  想全部停掉  ：bash $0 stop"
     ;;
 
   once)

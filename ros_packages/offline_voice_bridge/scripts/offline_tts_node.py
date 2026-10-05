@@ -13,7 +13,7 @@ import threading
 import time
 
 import rospy
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 
 class OfflineTtsNode(object):
@@ -37,6 +37,13 @@ class OfflineTtsNode(object):
         self.synthesis_timeout = float(rospy.get_param("~synthesis_timeout", 30.0))
         self.playback_timeout = float(rospy.get_param("~playback_timeout", 60.0))
         self.max_pending = max(1, int(rospy.get_param("~max_pending_sentences", 4)))
+        # 声学级静音用：播报期间在 /voice/speaking 上发布 true，
+        # ASR 节点收到后停止录音，避免把机器人自己的话当成用户回答。
+        # tail 是播报结束后再多静音一会儿，等房间混响散掉。
+        self.speaking_topic = rospy.get_param("~speaking_topic", "/voice/speaking")
+        self.speaking_tail_seconds = max(
+            0.0, float(rospy.get_param("~speaking_tail_seconds", 0.15))
+        )
 
         self._pending = collections.deque()
         self._lock = threading.Lock()
@@ -49,6 +56,7 @@ class OfflineTtsNode(object):
         self._worker.start()
 
         self.sub = rospy.Subscriber(self.say_topic, String, self.say_callback, queue_size=20)
+        self.speaking_pub = rospy.Publisher(self.speaking_topic, Bool, queue_size=10)
         rospy.on_shutdown(self.shutdown)
         rospy.loginfo(
             "Offline TTS ready: topic=%s engine=piper model=%s device=%s",
@@ -146,6 +154,8 @@ class OfflineTtsNode(object):
     def speak(self, text):
         wav_path = self._next_wav_path()
         rospy.loginfo("TTS: %s", text)
+        # 先举旗：从合成开始就算"正在播报"，这样 ASR 在整句话期间都不录音
+        self._publish_speaking(True)
         try:
             synth_seconds = self.synthesize(text, wav_path)
             start = time.time()
@@ -156,13 +166,25 @@ class OfflineTtsNode(object):
                 time.time() - start,
             )
         finally:
+            # 落旗前多静音一会儿，避免把播报尾音/混响录进去
+            if self.speaking_tail_seconds > 0.0:
+                time.sleep(self.speaking_tail_seconds)
+            self._publish_speaking(False)
             if not self.keep_wav:
                 try:
                     os.unlink(wav_path)
                 except OSError:
                     pass
 
+    def _publish_speaking(self, active):
+        try:
+            self.speaking_pub.publish(Bool(data=bool(active)))
+        except Exception as exc:
+            rospy.logwarn_throttle(5.0, "发布播报状态失败: %s", exc)
+
     def shutdown(self):
+        # 退出时务必落旗，否则 ASR 会一直以为机器人在说话、永远不录音
+        self._publish_speaking(False)
         self._wake.set()
 
 

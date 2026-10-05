@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>wpb_service_robot</name>
+  <version>0.1.0</version>
+  <description>
+    Competition total task for the WPB Home service robot: enroll multiple
+    owners (name + face + body via voice), then search for each of them and
+    recognise what they are doing.  Modules that are not finished yet
+    (navigation / electrical switch / fall assist / exit) are kept as explicit
+    placeholder interfaces in task_all_owners.py so they can be filled in later
+    without touching the main flow.
+  </description>
+
+  <maintainer email="dyp@example.com">dyp</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>actionlib</depend>
+  <depend>actionlib_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>geometry_msgs</depend>
+  <depend>move_base_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>perception_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <!-- 运行期需要、但不需要编译的 -->
+  <exec_depend>offline_voice_bridge</exec_depend>
+  <exec_depend>roslaunch</exec_depend>
+  <exec_depend>kinect2_bridge</exec_depend>
+  <exec_depend>move_base</exec_depend>
+  <exec_depend>sound_play</exec_depend>
+  <exec_depend>wpb_home_bringup</exec_depend>
+  <exec_depend>waterplus_map_tools</exec_depend>
+</package>

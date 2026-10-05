@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 启智机器人 一键设备自检
 # 用途：确认底盘 / 激光雷达 / Kinect / 声卡 / GPU 是否都在线，可随时重跑。
-# 运行：bash ~/competition/robot_selfcheck.sh
+# 运行：bash ~/catkin_ws/competition/robot_selfcheck.sh
 # 注意：只读取传感器数据，不会让机器人移动。
 
 set +e

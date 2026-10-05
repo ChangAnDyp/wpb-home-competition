@@ -18,6 +18,17 @@
   <arg name="asr_capture_volume" default="150%" />
   <arg name="asr_capture_gain" default="2.0" />
   <arg name="asr_energy_threshold" default="80" />
+  <!-- 比赛链路把 ASR 切片缩到 2 秒：识别延迟从约 4.5 秒降到约 2.5 秒，
+     现场问答（报名字/确认）会顺畅很多。想恢复原样传 asr_window_seconds:=4.0。 -->
+  <arg name="asr_window_seconds" default="2.0" />
+  <!-- 声学级静音：TTS 播报期间 ASR 暂停录音。
+       排查"完全听不到语音"时可传 asr_tts_squelch:=false 关闭。 -->
+  <arg name="asr_tts_squelch" default="true" />
+  <!-- TTS 语速：Piper 的 length_scale，越小越快（1.0 = 原速）。
+       注册流程里播报很长，调快能明显缩短整体时间。
+       注意：调快后要同步调大各脚本的 tts_chars_per_second，
+       否则脚本会按"原速"估算播报时长、说完还在干等。 -->
+  <arg name="tts_length_scale" default="1.0" />
   <arg name="start_task" default="true" />
   <arg name="start_rviz" default="true" />
 
@@ -47,6 +58,13 @@
   <arg name="yolo_debug_image_topic" default="/perception/yoloworld/debug_image" />
   <arg name="yolo_imgsz" default="384" />
   <arg name="yolo_process_every_n" default="3" />
+  <!-- YOLO-World 是开放词表检测器：类别名就是"提示词"。
+       原来的 classes=person 对"躺着的人"检出率很低（实测 45 秒扫描里
+       只出 1 个候选框），补上躺/坐类提示词能明显提高检出率。
+       检测脚本对类别名的过滤已放宽：任何包含 person 的标签都会被接受。 -->
+  <arg name="yolo_classes" default="person,lying person,person lying down,sitting person" />
+  <!-- 置信度从 0.30 降到 0.20：躺姿的分数普遍偏低，0.30 会直接滤掉 -->
+  <arg name="yolo_conf" default="0.20" />
   <arg name="yolo_warmup" default="true" />
   <arg name="yolo_publish_debug" default="false" />
   <arg name="yolo_display_fps" default="15.0" />
@@ -105,11 +123,11 @@
       <param name="device" value="$(arg device)" />
       <param name="require_gpu" value="true" />
       <param name="imgsz" value="$(arg yolo_imgsz)" />
-      <param name="conf" value="0.30" />
+      <param name="conf" value="$(arg yolo_conf)" />
       <param name="iou" value="0.45" />
       <param name="max_det" value="5" />
       <param name="process_every_n" value="$(arg yolo_process_every_n)" />
-      <param name="classes" value="person" />
+      <param name="classes" value="$(arg yolo_classes)" />
       <param name="warmup" value="$(arg yolo_warmup)" />
       <param name="publish_debug" value="$(arg yolo_publish_debug)" />
       <remap from="~detections" to="$(arg detections_topic)" />
@@ -143,6 +161,9 @@
       <arg name="asr_capture_volume" value="$(arg asr_capture_volume)" />
       <arg name="asr_capture_gain" value="$(arg asr_capture_gain)" />
       <arg name="asr_energy_threshold" value="$(arg asr_energy_threshold)" />
+      <arg name="asr_window_seconds" value="$(arg asr_window_seconds)" />
+      <arg name="asr_tts_squelch" value="$(arg asr_tts_squelch)" />
+      <arg name="tts_length_scale" value="$(arg tts_length_scale)" />
     </include>
   </group>
 

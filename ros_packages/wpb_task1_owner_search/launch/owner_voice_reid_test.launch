@@ -111,7 +111,7 @@
   <arg name="front_to_side_record_sample_interval" default="0.35" />
 
   <arg name="action_recognition_enabled" default="true" />
-  <arg name="action_launch_file" default="/home/dyp/catkin_ws/src/offline_voice_bridge/launch/qwen_action_recognition.launch" />
+  <arg name="action_launch_file" default="/home/dyp/catkin_ws/src/wpb_task1_owner_search/launch/qwen_action_recognition.launch" />
   <arg name="action_node_name" default="owner_action_qwen" />
   <arg name="action_result_topic" default="/owner_voice_reid_test/action_result" />
   <arg name="action_timeout" default="150.0" />
@@ -128,7 +128,8 @@
   <arg name="action_llm_frame_count" default="5" />
   <arg name="action_pose_enabled" default="true" />
   <arg name="action_pose_model_path" default="" />
-  <arg name="action_pose_device" default="cpu" />
+  <!-- 姿态模型默认跑 GPU（CUDA 不可用时节点自动回退 CPU 并告警） -->
+  <arg name="action_pose_device" default="cuda:0" />
   <arg name="action_pose_image_size" default="416" />
   <arg name="action_pose_confidence" default="0.25" />
   <arg name="action_pose_iou" default="0.45" />

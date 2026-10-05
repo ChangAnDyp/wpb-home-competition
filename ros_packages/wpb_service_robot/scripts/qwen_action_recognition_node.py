@@ -30,12 +30,13 @@ DEFAULT_POSE_MODEL_CANDIDATES = (
     os.path.join(
         WORKSPACE_ROOT,
         "src",
-        "wpr_task1_owner_search",
+        "wpb_task1_owner_search",
         "models",
         "pose",
         "yolo11n-pose.pt",
     ),
     os.path.join(WORKSPACE_ROOT, "yolo11n-pose.pt"),
+    os.path.join(os.path.expanduser("~"), "models", "yolo11n-pose.pt"),
 )
 
 ACTION_UNKNOWN = "unknown"
@@ -49,6 +50,51 @@ PLACE_TEXT = {
     "none": "",
     "unknown": "",
 }
+
+# 预览窗口叠加用的中文标签（英文结论 -> 中文显示）
+ACTION_TEXT = {
+    "sitting": "坐着",
+    "lying": "躺着",
+    "fallen": "摔倒在地",
+    "sudden_fall": "突然摔倒",
+    "waving": "挥手",
+    "unknown": "未知",
+}
+
+PLACE_LABEL = {
+    "chair": "椅子",
+    "sofa": "沙发",
+    "bed": "床",
+    "floor": "地面",
+    "none": "",
+    "unknown": "未知",
+}
+
+
+def draw_text_box(image, text, origin, color, scale=0.6, thickness=2):
+    """在图像上画一行带黑底的文字，返回下一行建议的 y 坐标。"""
+    x, y = origin
+    (text_w, text_h), baseline = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+    )
+    cv2.rectangle(
+        image,
+        (max(0, x - 4), max(0, y - text_h - baseline - 2)),
+        (min(image.shape[1] - 1, x + text_w + 4), y + baseline + 2),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(
+        image,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+    return y + text_h + baseline + 10
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +311,59 @@ def result_to_speech(action, place):
     return "暂时无法判断主人的动作。"
 
 
+def final_posture_is_horizontal(features):
+    """判断"最终是不是横躺"，用最后一段帧的比例而不是只看最后一帧。
+
+    姿态分类器判定"倒下 / 已经躺下"时，用的是最后 1/4 帧里 lying_like 的比例
+    （见 PoseActionAnalyzer.classify）。高度判断必须用同一口径，否则
+    "从坐到躺"的过程中最后一帧还没完全躺平，高度判断就被跳过，
+    躺在床上也会被判成 sudden_fall（主人摔倒）。
+    """
+    if not features:
+        return False
+    split = max(2, int(math.ceil(len(features) / 4.0)))
+    last = features[-split:]
+    # 这里只回答一个问题："人最后是不是横躺下来了"。
+    # 注意不要跟着 classify 的 final_posture_is_low 把 sitting_like 也算进来——
+    # 那样"坐在床上"也会被判成姿态放低，进而触发 elevated_lying -> lying，
+    # 把坐着的人说成躺着。
+    # "坐在床上往下躺"最后会变成 lying_like，所以只看横躺就够了；
+    # 万一最后一帧还没躺平，也由 merge 里"家具面 + sudden_fall -> lying"
+    # 那条规则兜住，不依赖这里。
+    lying = sum(1 for feature in last if feature.get("lying_like"))
+    return (lying / float(len(last))) >= 0.30
+
+
+def relation_is_elevated(ground_relation):
+    """判断支撑面是否高于地面（床/沙发/椅等家具面）。
+
+    高度优先级：
+      1) 点云直接给出 status == elevated
+      2) 支撑面绝对高度中位数 >= 家具高度阈值（默认 0.42m）
+      3) 相对本地地面的抬升量 >= 0.24m（兜底，本地地面不可靠时仅供参考）
+
+    高度单位是“距地高度（米）”，由 PointCloudGroundAnalyzer 用相机安装高度
+    换算得到，所以 pointcloud_camera_height 必须接近真实相机离地高度。
+    """
+    if not ground_relation:
+        return False
+    if ground_relation.get("status") == "elevated":
+        return True
+    median = ground_relation.get("surface_height_median")
+    limit = ground_relation.get("furniture_height_limit")
+    if median is not None and limit is not None:
+        return float(median) >= float(limit)
+    delta = ground_relation.get("height_above_local_floor")
+    if delta is not None:
+        return float(delta) >= 0.24
+    return False
+
+
 def merge_pose_action_result(pose_action, ground_relation, final_pose_is_horizontal):
+    ground_relation = ground_relation or {}
+    elevated_surface = relation_is_elevated(ground_relation)
     elevated_lying = bool(
-        ground_relation.get("status") == "elevated" and final_pose_is_horizontal
+        elevated_surface and final_pose_is_horizontal
     )
     ground_fallen = bool(
         ground_relation.get("ground_like")
@@ -278,6 +374,14 @@ def merge_pose_action_result(pose_action, ground_relation, final_pose_is_horizon
         )
     )
 
+    # 高度优先：人最终横躺在家具面（床/沙发/椅）上时，即使姿态检测到“倒下过程”，
+    # 也应判为 lying，而不是 fallen。
+    if elevated_lying and pose_action in ("sudden_fall", "fallen", "lying"):
+        return "lying", PLACE_UNKNOWN, ground_fallen, True
+    # 支撑面已经是家具面时，不可能"摔倒在地"——那只是往家具上躺下去。
+    # （高度算准之后，这条才敢放开：地上躺着的读数在任何距离都接近 0。）
+    if elevated_surface and pose_action == "sudden_fall":
+        return "lying", PLACE_UNKNOWN, ground_fallen, True
     if pose_action == "sudden_fall":
         return "sudden_fall", "floor", ground_fallen, elevated_lying
     if ground_fallen:
@@ -341,8 +445,9 @@ def merge_action_result(
         pose_action = ACTION_UNKNOWN
 
     # 与 merge_pose_action_result 保持一致的几何判据
+    elevated_surface = relation_is_elevated(ground_relation)
     elevated_lying = bool(
-        ground_relation.get("status") == "elevated" and final_pose_is_horizontal
+        elevated_surface and final_pose_is_horizontal
     )
     ground_fallen = bool(
         ground_relation.get("ground_like")
@@ -353,6 +458,17 @@ def merge_action_result(
             or qwen_action in ("lying", "fallen", "sudden_fall")
         )
     )
+
+    # 0) 高度优先：人最终横躺在家具面（床/沙发/椅）上时，无论姿态还是 Qwen
+    #    给出“倒下/摔倒”，都应判为 lying 而不是 fallen。
+    if elevated_lying and (
+        pose_action in ("sudden_fall", "fallen", "lying")
+        or qwen_action in ("fallen", "sudden_fall", "lying")
+    ):
+        return "lying", PLACE_UNKNOWN, ground_fallen, True
+    # 家具面上不可能"摔倒在地"：姿态报 sudden_fall 也只是往家具上躺
+    if elevated_surface and pose_action == "sudden_fall" and not ground_fallen:
+        return "lying", PLACE_UNKNOWN, ground_fallen, True
 
     # 1) 动态动作只认姿态证据
     if pose_action == "sudden_fall":
@@ -387,15 +503,39 @@ def merge_action_result(
 
 
 class PoseActionAnalyzer:
-    def __init__(self, model_path, device, image_size, confidence, iou, max_detections):
+    def __init__(
+        self,
+        model_path,
+        device,
+        image_size,
+        confidence,
+        iou,
+        max_detections,
+        half=False,
+    ):
         self.model_path = model_path
         self.device = device
+        self.half = bool(half)
         self.image_size = image_size
         self.confidence = confidence
         self.iou = iou
         self.max_detections = max_detections
         self.model = None
         self.ready = False
+
+    def _resolve_device(self):
+        """请求 CUDA 但不可用时回退到 CPU，避免整个节点启动失败。"""
+        device = str(self.device or "cpu")
+        if not device.startswith("cuda"):
+            return device, ""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return "cpu", "请求 %s 但 torch.cuda.is_available()=False，已回退 CPU" % device
+        except Exception as exc:
+            return "cpu", "请求 %s 但检查 CUDA 失败(%s)，已回退 CPU" % (device, exc)
+        return device, ""
 
     @staticmethod
     def resolve_model_path(configured_path):
@@ -410,12 +550,16 @@ class PoseActionAnalyzer:
     def initialize(self):
         if not self.model_path:
             return False, "pose model file not found"
+        device, note = self._resolve_device()
+        if note:
+            rospy.logwarn("Pose device: %s", note)
+            self.device = device
         try:
             from ultralytics import YOLO
 
             self.model = YOLO(self.model_path)
             self.ready = True
-            return True, "pose model loaded"
+            return True, "pose model loaded on %s" % self.device
         except Exception as exc:
             self.model = None
             self.ready = False
@@ -606,21 +750,34 @@ class PoseActionAnalyzer:
             "right_wrist_y": right_wrist_y,
         }
 
+    def _predict(self, frame):
+        """跑一次姿态推理。
+
+        GPU 半精度：新版本 ultralytics 把 half 改名成 quantize(16=FP16)，
+        旧版本仍叫 half。先试新名，失败再退回旧名，避免每帧刷弃用警告。
+        """
+        kwargs = dict(
+            imgsz=self.image_size,
+            conf=self.confidence,
+            iou=self.iou,
+            device=self.device,
+            max_det=self.max_detections,
+            verbose=False,
+        )
+        if self.half and str(self.device).startswith("cuda"):
+            try:
+                return self.model.predict(frame, quantize=16, **kwargs)
+            except Exception:
+                return self.model.predict(frame, half=True, **kwargs)
+        return self.model.predict(frame, **kwargs)
+
     def extract_features(self, frames, target_center=None, target_centers=None):
         if not self.ready or self.model is None:
             return []
         features = []
         for frame_index, frame in enumerate(frames):
             try:
-                results = self.model.predict(
-                    frame,
-                    imgsz=self.image_size,
-                    conf=self.confidence,
-                    iou=self.iou,
-                    device=self.device,
-                    max_det=self.max_detections,
-                    verbose=False,
-                )
+                results = self._predict(frame)
             except Exception:
                 continue
             if not results:
@@ -837,8 +994,14 @@ class PointCloudGroundAnalyzer:
         anchor_radius,
         local_ground_padding,
         local_ground_elevation_delta,
+        elevated_context_min_height=0.15,
     ):
         self.camera_height = camera_height
+        # 地面线拟合结果 y = slope*z + intercept（光学坐标系）。
+        # 相机俯视时地面在图像里不是水平线，必须用这条线算"离地高度"，
+        # 不能用固定的 camera_height - y（那个公式只对水平相机成立）。
+        self.floor_slope = None
+        self.floor_intercept = None
         self.ground_height_limit = ground_height_limit
         self.furniture_height_limit = furniture_height_limit
         self.max_age = max_age
@@ -851,6 +1014,14 @@ class PointCloudGroundAnalyzer:
         self.anchor_radius = max(4.0, float(anchor_radius))
         self.local_ground_padding = max(0.25, min(1.50, float(local_ground_padding)))
         self.local_ground_elevation_delta = max(0.12, float(local_ground_elevation_delta))
+        # "高于本地地面"这条兜底规则的附加前提：周围那一圈本身也得离地。
+        # 否则"高于地面 0.24m"量的可能只是**人的身体厚度**——
+        # 实测：人平躺在地上时，胸口离地约 0.27m，人体框周围的 15% 分位是
+        # 地面(-0.02m)，差值 0.29m 就超过了 0.24 的阈值，于是"躺在地上"
+        # 被判成"躺在家具上"(lying)，而不是摔倒(fallen)。
+        self.elevated_context_min_height = max(
+            0.0, float(elevated_context_min_height)
+        )
 
     @staticmethod
     def _percentile(values, percentile):
@@ -894,6 +1065,130 @@ class PointCloudGroundAnalyzer:
         except Exception as exc:
             return points, "point cloud read failed: %s" % exc
         return points, ""
+
+    def optical_height(self, point):
+        """光学坐标系点 -> 离地高度（米）。
+
+        相机俯视时，地面在图像里不是一条水平线：同一个地面越远，y 越小。
+        所以不能用固定的 camera_height - y（那个只对水平相机成立），
+        而要用标定出来的地面线 y_floor(z) = a*z + b，取点到这条线的垂距。
+        """
+        _x, y, z = point
+        if self.floor_slope is not None and self.floor_intercept is not None:
+            floor_y = self.floor_slope * z + self.floor_intercept
+            return (floor_y - y) / math.sqrt(1.0 + self.floor_slope * self.floor_slope)
+        return self.camera_height - y
+
+    def estimate_floor_line(
+        self,
+        cloud,
+        band_count=6,
+        lower_ratio=0.55,
+        upper_ratio=0.98,
+        min_samples=15,
+    ):
+        """从点云拟合地面线 y = a*z + b（光学坐标系）。
+
+        相机俯视时，图像里不同高度的行对应不同的地面距离。把画面下半部分
+        按行分成若干带，每带取"最靠下（y 最大）的那批点"作为地面，得到
+        (z, y) 样本，再最小二乘拟合。返回 (a, b) 或 None。
+        """
+        if cloud is None or self._mode_for_cloud(cloud) != "optical":
+            return None
+        cloud_height = int(getattr(cloud, "height", 0))
+        cloud_width = int(getattr(cloud, "width", 0))
+        if cloud_height <= 1 or cloud_width <= 1:
+            return None
+
+        v_start = self._clamp_int(cloud_height * lower_ratio, 0, cloud_height - 1)
+        v_end = max(v_start + 1, self._clamp_int(cloud_height * upper_ratio, 0, cloud_height))
+        u1 = self._clamp_int(cloud_width * 0.15, 0, cloud_width - 1)
+        u2 = max(u1 + 1, self._clamp_int(cloud_width * 0.85, 0, cloud_width))
+
+        samples = []
+        for index in range(band_count):
+            v1 = v_start + int(round((v_end - v_start) * index / float(band_count)))
+            v2 = max(v1 + 1, v_start + int(round((v_end - v_start) * (index + 1) / float(band_count))))
+            uvs = [(u, v) for v in range(v1, v2, 2) for u in range(u1, u2, 4)]
+            points, _ = self._read_points(cloud, uvs)
+            usable = [
+                point
+                for point in points
+                if math.isfinite(point[1]) and 0.3 <= point[2] <= 6.0
+            ]
+            if len(usable) < min_samples:
+                continue
+            y_floor = self._percentile([point[1] for point in usable], 85.0)
+            near_floor = [
+                point[2] for point in usable if point[1] >= y_floor - 0.03
+            ]
+            if len(near_floor) < 3:
+                continue
+            samples.append((self._percentile(near_floor, 50.0), y_floor))
+
+        if len(samples) < 2:
+            return None
+
+        count = float(len(samples))
+        sum_z = sum(sample[0] for sample in samples)
+        sum_y = sum(sample[1] for sample in samples)
+        sum_zz = sum(sample[0] * sample[0] for sample in samples)
+        sum_zy = sum(sample[0] * sample[1] for sample in samples)
+        denom = count * sum_zz - sum_z * sum_z
+        if abs(denom) < 1e-9:
+            return None
+        slope = (count * sum_zy - sum_z * sum_y) / denom
+        intercept = (sum_y - slope * sum_z) / count
+        if not (math.isfinite(slope) and math.isfinite(intercept)):
+            return None
+        return slope, intercept
+
+    def estimate_camera_height(
+        self,
+        cloud,
+        lower_ratio=0.80,
+        upper_ratio=0.98,
+        side_margin=0.25,
+        min_depth=0.4,
+        max_depth=3.0,
+        min_samples=40,
+    ):
+        """从"画面最下方那一带地面"估计相机离地高度（米）。
+
+        原理：Kinect 大致水平安装时，地面在光学坐标系里恒为 y ≈ 相机高度
+        （光学系 y 轴朝下）。地面上的物体只会让 y 变小、不会变大，所以取
+        画面底部那一带的 y 中位数，就得到相机离地高度。
+
+        只对光学坐标系（kinect2_rgb_optical_frame）有效；base 坐标系本来
+        就以地面为原点，不需要标定。
+        """
+        if cloud is None:
+            return None
+        if self._mode_for_cloud(cloud) != "optical":
+            return None
+        cloud_height = int(getattr(cloud, "height", 0))
+        cloud_width = int(getattr(cloud, "width", 0))
+        if cloud_height <= 1 or cloud_width <= 1:
+            return None
+
+        v1 = self._clamp_int(cloud_height * lower_ratio, 0, cloud_height - 1)
+        v2 = max(v1 + 1, self._clamp_int(cloud_height * upper_ratio, 0, cloud_height))
+        u1 = self._clamp_int(cloud_width * side_margin, 0, cloud_width - 1)
+        u2 = max(u1 + 1, self._clamp_int(cloud_width * (1.0 - side_margin), 0, cloud_width))
+
+        uvs = [(u, v) for v in range(v1, v2, 2) for u in range(u1, u2, 2)]
+        points, _ = self._read_points(cloud, uvs)
+        if not points:
+            return None
+        # 取深度合适的点：太近可能拍到机身，太远误差大
+        ys = [
+            point[1]
+            for point in points
+            if min_depth <= point[2] <= max_depth
+        ]
+        if len(ys) < min_samples:
+            return None
+        return self._percentile(ys, 50.0)
 
     def analyze(self, cloud, cloud_age, image_shape, bbox, anchors=None):
         if cloud is None:
@@ -987,7 +1282,7 @@ class PointCloudGroundAnalyzer:
         mode = self._mode_for_cloud(cloud)
         if mode == "optical":
             transformed = [
-                (point[2], -point[0], self.camera_height - point[1])
+                (point[2], -point[0], self.optical_height(point))
                 for point in points
             ]
         else:
@@ -1013,7 +1308,7 @@ class PointCloudGroundAnalyzer:
             raw_context_points, _ = self._read_points(cloud, context_uvs)
             if mode == "optical":
                 transformed_context = [
-                    (point[2], -point[0], self.camera_height - point[1])
+                    (point[2], -point[0], self.optical_height(point))
                     for point in raw_context_points
                 ]
             else:
@@ -1089,6 +1384,11 @@ class PointCloudGroundAnalyzer:
                 and low_height_above_local_floor is not None
                 and height_above_local_floor >= self.local_ground_elevation_delta
                 and low_height_above_local_floor >= self.local_ground_elevation_delta * 0.55
+                # 关键前提：周围那一圈本身也得离地。
+                # 躺在地上时周围一圈就是地面(≈0)，这里的差值 0.29m 只是
+                # "人体厚度"，不能当成"躺在家具上"。
+                and local_floor_height is not None
+                and local_floor_height >= self.elevated_context_min_height
             )
 
         if elevated_by_context:
@@ -1101,7 +1401,15 @@ class PointCloudGroundAnalyzer:
             status = "unknown"
 
         ground_confident = bool(status == "ground")
-        if ground_confident and height_above_local_floor is not None:
+        if ground_confident and low_height_above_local_floor is not None:
+            # 用"身体最贴近地面的那部分(p20)"判断，而不是人体采样中位数：
+            # 人躺在地上时身体本身就有 20~30cm 厚，中位数会被自己的厚度顶出阈值，
+            # 结果"躺在地上"反而被判成"不是地面"。
+            ground_confident = (
+                low_height_above_local_floor
+                <= self.local_ground_elevation_delta * 0.90
+            )
+        elif ground_confident and height_above_local_floor is not None:
             ground_confident = height_above_local_floor <= self.local_ground_elevation_delta * 0.90
         elif ground_confident and median is not None:
             ground_confident = bool(
@@ -1114,6 +1422,8 @@ class PointCloudGroundAnalyzer:
             "status": status,
             "ground_like": status == "ground",
             "ground_confident": ground_confident,
+            "ground_height_limit": self.ground_height_limit,
+            "furniture_height_limit": self.furniture_height_limit,
             "surface_height_median": median,
             "surface_height_p20": p20,
             "surface_height_p80": p80,
@@ -1170,12 +1480,13 @@ class PoseActionRecognitionNode:
             float(rospy.get_param("~pose_confidence", 0.25)),
             float(rospy.get_param("~pose_iou", 0.45)),
             max(1, int(rospy.get_param("~pose_max_detections", 4))),
+            bool(rospy.get_param("~pose_half", False)),
         )
         self.pointcloud_enabled = bool(rospy.get_param("~pointcloud_enabled", True))
         self.pointcloud_analyzer = PointCloudGroundAnalyzer(
             float(rospy.get_param("~pointcloud_camera_height", 0.85)),
             float(rospy.get_param("~pointcloud_ground_height_limit", 0.35)),
-            float(rospy.get_param("~pointcloud_furniture_height_limit", 0.42)),
+            float(rospy.get_param("~pointcloud_furniture_height_limit", 0.40)),
             max(0.1, float(rospy.get_param("~pointcloud_max_age", 1.0))),
             max(1, int(rospy.get_param("~pointcloud_stride", 8))),
             max(8, int(rospy.get_param("~pointcloud_min_samples", 30))),
@@ -1186,7 +1497,19 @@ class PoseActionRecognitionNode:
             float(rospy.get_param("~pointcloud_anchor_radius", 14.0)),
             float(rospy.get_param("~pointcloud_local_ground_padding", 0.85)),
             float(rospy.get_param("~pointcloud_elevated_delta", 0.24)),
+            float(rospy.get_param("~pointcloud_elevated_context_min_height", 0.15)),
         )
+        # 相机离地高度自动标定：拆装机器人后相机高度会变，
+        # 开机时用点云现场测一次，比写死 0.85 可靠。
+        self.auto_camera_height = bool(rospy.get_param("~auto_camera_height", True))
+        self.camera_height_calibration_timeout = max(
+            1.0, float(rospy.get_param("~camera_height_calibration_timeout", 8.0))
+        )
+        self.camera_height_calibration_samples = max(
+            1, int(rospy.get_param("~camera_height_calibration_samples", 5))
+        )
+        self.camera_height_min = float(rospy.get_param("~camera_height_min", 0.30))
+        self.camera_height_max = float(rospy.get_param("~camera_height_max", 1.80))
         self.say_wait_timeout = float(rospy.get_param("~say_wait_timeout", 5.0))
         self.model_warmup_retries = max(1, int(rospy.get_param("~model_warmup_retries", 3)))
         self.model_warmup_retry_delay = max(
@@ -1198,6 +1521,28 @@ class PoseActionRecognitionNode:
             0.0,
             min(1.0, float(rospy.get_param("~roi_padding", 0.55))),
         )
+        self.overlay_hold_seconds = max(
+            0.0, float(rospy.get_param("~overlay_hold_seconds", 6.0))
+        )
+        self.overlay_lock = threading.Lock()
+        self.overlay_frame = None
+        self.overlay_until = 0.0
+        # 外部触发（供任务节点调用）：每收到一次触发做一次识别，
+        # 可携带该次请求的 ROI 与 request_id，结果里原样带回 request_id。
+        self.trigger_topic = rospy.get_param("~trigger_topic", "~trigger")
+        self.speak_enabled = bool(rospy.get_param("~speak_enabled", True))
+        # 被外部触发时默认不播报（调用方自己决定说什么），置 true 可让它也播报
+        self.speak_on_trigger = bool(rospy.get_param("~speak_on_trigger", False))
+        self.request_lock = threading.Lock()
+        self.pending_request_id = ""
+        self.pending_roi = None
+        self.active_request_id = ""
+        self.active_roi = None
+        self.last_action = ACTION_UNKNOWN
+        self.last_place = PLACE_UNKNOWN
+        self.last_pose_action = ACTION_UNKNOWN
+        self.last_confidence = 0.0
+        self.last_ground_status = "unknown"
 
         self.frame_lock = threading.Lock()
         self.latest_frame = None
@@ -1226,6 +1571,18 @@ class PoseActionRecognitionNode:
                 queue_size=1,
                 buff_size=2**24,
             )
+        self.trigger_sub = rospy.Subscriber(
+            self.trigger_topic,
+            String,
+            self.trigger_callback,
+            queue_size=5,
+        )
+        rospy.loginfo("Action recognition trigger topic: %s", self.trigger_topic)
+        # "我已就绪"信号：模型加载 + 预热 + 地面线标定全部完成之后才发。
+        # 调用方（复用模式）会等这条消息再发第一次触发，避免开局那几次
+        # 触发被"还没预热好"挡掉、白等好几秒。latch=True 让晚连的订阅者
+        # 也能立刻收到。
+        self.ready_pub = rospy.Publisher("~ready", String, queue_size=1, latch=True)
 
         self.inference_lock = threading.Lock()
         self.last_inference_time = 0.0
@@ -1278,14 +1635,55 @@ class PoseActionRecognitionNode:
     def wait_for_camera_frame(self):
         deadline = time.time() + max(5.0, self.camera_wait_timeout)
         rate = rospy.Rate(30)
+        started = time.time()
+        self._last_wait_log = 0.0
         while not rospy.is_shutdown() and time.time() < deadline:
             with self.frame_lock:
                 has_frame = self.latest_frame is not None
             if has_frame:
+                rospy.loginfo(
+                    "Camera frame received on %s after %.1fs",
+                    self.image_topic,
+                    time.time() - started,
+                )
                 return
+            self.log_camera_wait_state(time.time() - started)
             self.show_preview()
             rate.sleep()
-        raise RuntimeError("Timed out waiting for camera image: %s" % self.image_topic)
+        raise RuntimeError(
+            "Timed out waiting for camera image: %s (waited %.0fs). %s"
+            % (self.image_topic, time.time() - started, self.describe_image_topics())
+        )
+
+    @staticmethod
+    def describe_image_topics():
+        """查询 master 上现有的图像/点云话题，用于超时报错时定位原因。"""
+        try:
+            _, _, topic_types = rospy.get_master().getTopicTypes()
+        except Exception as exc:
+            return "无法查询 ROS master（master 没起来或连不上？）: %s" % exc
+        names = sorted(
+            name
+            for name, _ in topic_types
+            if "image" in name.lower() or "points" in name.lower()
+        )
+        if not names:
+            return "master 上没有任何图像/点云话题：机器人栈（kinect2 驱动）没有起来"
+        return "master 上现有图像/点云话题: %s" % ", ".join(names)
+
+    def log_camera_wait_state(self, waited):
+        """每 5 秒提示一次等待状态和可用话题，避免 90 秒静默后只报一句超时。"""
+        now = time.time()
+        if now - self._last_wait_log < 5.0:
+            return
+        self._last_wait_log = now
+        rospy.logwarn(
+            "Waiting for camera image %s (%.0fs/%.0fs). %s",
+            self.image_topic,
+            waited,
+            max(5.0, self.camera_wait_timeout),
+            self.describe_image_topics(),
+        )
 
     def get_latest_frame(self):
         with self.frame_lock:
@@ -1298,10 +1696,12 @@ class PoseActionRecognitionNode:
             return self.latest_pointcloud, self.latest_pointcloud_stamp
 
     def prepare_action_frame(self, frame):
-        if not self.use_owner_roi or self.owner_roi is None:
+        # 本次请求若带了 ROI（外部触发），优先用它；否则退回静态 owner_roi
+        roi = self.active_roi if self.active_roi is not None else self.owner_roi
+        if roi is None or (not self.use_owner_roi and self.active_roi is None):
             return frame, None
         height, width = frame.shape[:2]
-        x1, y1, x2, y2 = self.owner_roi
+        x1, y1, x2, y2 = roi
         x1 = max(0, min(width - 1, x1))
         y1 = max(0, min(height - 1, y1))
         x2 = max(x1 + 1, min(width, x2))
@@ -1329,27 +1729,162 @@ class PoseActionRecognitionNode:
         with self.capture_status_lock:
             return self.capture_status
 
+    @staticmethod
+    def _geometry_in_full_frame(feature, roi):
+        """把 ROI 裁剪帧里的 bbox/关键点换算回整帧坐标。"""
+        if not feature:
+            return None, []
+        bbox = feature.get("body_bbox") or feature.get("bbox")
+        anchors = list(feature.get("body_anchors") or [])
+        if roi is not None:
+            offset_x, offset_y = float(roi[0]), float(roi[1])
+            if bbox is not None and len(bbox) >= 4:
+                bbox = (
+                    float(bbox[0]) + offset_x,
+                    float(bbox[1]) + offset_y,
+                    float(bbox[2]) + offset_x,
+                    float(bbox[3]) + offset_y,
+                )
+            anchors = [
+                (float(point[0]) + offset_x, float(point[1]) + offset_y)
+                for point in anchors
+            ]
+        return bbox, anchors
+
+    def render_analysis_frame(
+        self,
+        frame,
+        feature,
+        roi,
+        action,
+        place,
+        confidence,
+        pose_action,
+        ground_relation,
+    ):
+        """在抓拍的整帧上画出人体框、关键点和动作结论。"""
+        annotated = frame.copy()
+        ground_relation = ground_relation or {}
+        ground_status = ground_relation.get("status", "unknown")
+        surface_median = ground_relation.get("surface_height_median")
+        furniture_limit = ground_relation.get("furniture_height_limit")
+        if surface_median is not None:
+            surface_text = "%.2fm(%s)" % (surface_median, ground_status)
+            if furniture_limit is not None:
+                surface_text += " 家具阈值%.2fm" % furniture_limit
+        else:
+            surface_text = ground_status
+        bbox, anchors = self._geometry_in_full_frame(feature, roi)
+        height, width = annotated.shape[:2]
+        if bbox is not None and len(bbox) >= 4:
+            x1 = max(0, min(width - 1, int(round(float(bbox[0])))))
+            y1 = max(0, min(height - 1, int(round(float(bbox[1])))))
+            x2 = max(0, min(width - 1, int(round(float(bbox[2])))))
+            y2 = max(0, min(height - 1, int(round(float(bbox[3])))))
+            box_color = (
+                (0, 0, 255) if action in ("fallen", "sudden_fall") else (0, 200, 0)
+            )
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
+        for point in anchors:
+            center = (int(round(point[0])), int(round(point[1])))
+            if 0 <= center[0] < width and 0 <= center[1] < height:
+                cv2.circle(annotated, center, 4, (255, 128, 0), -1)
+                cv2.circle(annotated, center, 5, (0, 0, 0), 1)
+
+        lines = [
+            (
+                "动作: %s (%s)  置信度 %.2f"
+                % (ACTION_TEXT.get(action, action), action, confidence),
+                (0, 255, 255),
+            ),
+            (
+                "位置: %s   姿态: %s   支撑面: %s"
+                % (
+                    PLACE_LABEL.get(place, place) or place,
+                    ACTION_TEXT.get(pose_action, pose_action),
+                    surface_text,
+                ),
+                (0, 220, 0),
+            ),
+        ]
+        text_y = 30
+        for text, color in lines:
+            text_y = draw_text_box(annotated, text, (12, text_y), color)
+        return annotated
+
+    def set_result_overlay(
+        self, features, action, place, confidence, pose_action, ground_relation
+    ):
+        """记录最新结论，并把带标注的抓拍帧设为预览内容。"""
+        self.last_action = action
+        self.last_place = place
+        self.last_confidence = float(confidence)
+        self.last_pose_action = pose_action
+        self.last_ground_status = (ground_relation or {}).get("status", "unknown")
+        if not self.window_available:
+            return
+        frame = self.capture_full_frames[-1] if self.capture_full_frames else None
+        if frame is None:
+            return
+        roi = self.capture_rois[-1] if self.capture_rois else None
+        feature = features[-1] if features else None
+        annotated = self.render_analysis_frame(
+            frame, feature, roi, action, place, confidence, pose_action, ground_relation
+        )
+        with self.overlay_lock:
+            self.overlay_frame = annotated
+            self.overlay_until = time.time() + self.overlay_hold_seconds
+
+    def clear_result_overlay(self):
+        with self.overlay_lock:
+            self.overlay_frame = None
+            self.overlay_until = 0.0
+
     def show_preview(self):
         if not self.window_available:
             return
-        frame = self.get_latest_frame()
-        if frame is None:
-            return
+        now = time.time()
+        with self.overlay_lock:
+            overlay_frame = self.overlay_frame
+            overlay_until = self.overlay_until
         try:
-            display_frame = frame
-            status = self.get_capture_status()
-            if status:
-                display_frame = frame.copy()
-                cv2.putText(
+            if overlay_frame is not None and now < overlay_until:
+                display_frame = overlay_frame.copy()
+                draw_text_box(
                     display_frame,
-                    status,
-                    (16, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
+                    "识别结果（保持 %.1fs）" % max(0.0, overlay_until - now),
+                    (12, display_frame.shape[0] - 14),
                     (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
                 )
+            else:
+                frame = self.get_latest_frame()
+                if frame is None:
+                    return
+                display_frame = frame.copy()
+                status = self.get_capture_status()
+                if status:
+                    draw_text_box(display_frame, status, (16, 34), (0, 255, 255), 0.7)
+                elif self.warmup_done:
+                    draw_text_box(
+                        display_frame,
+                        "待命：按空格识别，q 退出",
+                        (16, 34),
+                        (0, 255, 255),
+                        0.7,
+                    )
+                if self.warmup_done and self.last_action != ACTION_UNKNOWN:
+                    draw_text_box(
+                        display_frame,
+                        "上次: %s / %s (%.2f)"
+                        % (
+                            ACTION_TEXT.get(self.last_action, self.last_action),
+                            PLACE_LABEL.get(self.last_place, self.last_place)
+                            or self.last_place,
+                            self.last_confidence,
+                        ),
+                        (16, display_frame.shape[0] - 14),
+                        (0, 220, 0),
+                    )
             cv2.imshow(self.window_name, display_frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):
@@ -1451,11 +1986,103 @@ class PoseActionRecognitionNode:
         rospy.loginfo("Local pose action helper warm-up complete")
         self.warmup_done = True
 
+    def calibrate_camera_height(self):
+        """开机时用点云现场标定相机离地高度。
+
+        拆装机器人后相机高度会变，写死的 0.85 会让"家具/地面"判断整体偏移，
+        所以每次启动都实测一次：取画面最下方那一带的地面点，用它们的 y
+        （光学系朝下）中位数作为相机离地高度。
+        """
+        analyzer = self.pointcloud_analyzer
+        if not self.pointcloud_enabled or analyzer is None:
+            return False
+        if not self.auto_camera_height:
+            rospy.loginfo(
+                "Camera height auto-calibration disabled; using %.3f m",
+                analyzer.camera_height,
+            )
+            return False
+
+        deadline = time.time() + self.camera_height_calibration_timeout
+        samples = []
+        floor_lines = []
+        rate = rospy.Rate(5)
+        while not rospy.is_shutdown() and time.time() < deadline:
+            cloud, cloud_stamp = self.get_latest_pointcloud()
+            cloud_age = time.time() - cloud_stamp if cloud_stamp else None
+            if cloud is not None and (cloud_age is None or cloud_age <= 1.0):
+                value = analyzer.estimate_camera_height(cloud)
+                if value is not None:
+                    samples.append(value)
+                line = analyzer.estimate_floor_line(cloud)
+                if line is not None:
+                    floor_lines.append(line)
+                if (
+                    len(samples) >= self.camera_height_calibration_samples
+                    and len(floor_lines) >= 3
+                ):
+                    break
+            rate.sleep()
+
+        if floor_lines:
+            # 拟合出地面线后，高度改用"点到地面线的垂距"，
+            # 不再依赖相机高度/俯角，距离远近都不影响。
+            slopes = sorted(value[0] for value in floor_lines)
+            intercepts = sorted(value[1] for value in floor_lines)
+            slope = slopes[len(slopes) // 2]
+            intercept = intercepts[len(intercepts) // 2]
+            analyzer.floor_slope = slope
+            analyzer.floor_intercept = intercept
+            rospy.loginfo(
+                "Floor line calibrated: y = %.4f*z + %.4f "
+                "(implied camera pitch %.1f deg, samples=%d)",
+                slope,
+                intercept,
+                math.degrees(math.atan(-slope)),
+                len(floor_lines),
+            )
+
+        if not samples:
+            rospy.logwarn(
+                "Camera height auto-calibration failed (no usable floor points); "
+                "keeping %.3f m",
+                analyzer.camera_height,
+            )
+            return False
+
+        samples.sort()
+        value = samples[len(samples) // 2]
+        clamped = max(self.camera_height_min, min(self.camera_height_max, value))
+        if abs(clamped - value) > 1e-6:
+            rospy.logwarn(
+                "Measured camera height %.3f m out of [%.2f, %.2f]; clamped to %.3f m",
+                value,
+                self.camera_height_min,
+                self.camera_height_max,
+                clamped,
+            )
+        analyzer.camera_height = clamped
+        rospy.loginfo(
+            "Camera height auto-calibrated: %.3f m (samples=%d, raw=%.3f..%.3f)",
+            clamped,
+            len(samples),
+            samples[0],
+            samples[-1],
+        )
+        return True
+
     def startup_sequence(self):
         try:
             self.speak(self.startup_speech)
             self.warmup_model()
+            self.calibrate_camera_height()
             self.startup_announced = True
+            # 一切就绪 -> 通知调用方"可以触发了"
+            try:
+                self.ready_pub.publish(String(data="ready"))
+                rospy.loginfo("动作识别已就绪，可以触发（ready 已发布）")
+            except Exception as exc:
+                rospy.logwarn("发布 ready 信号失败：%s", exc)
             if self.auto_analyze:
                 rospy.sleep(max(0.0, self.capture_delay))
                 self.request_inference("startup")
@@ -1469,13 +2096,13 @@ class PoseActionRecognitionNode:
 
     def request_inference(self, reason):
         if not self.warmup_done:
-            return
+            return False
         now = time.time()
         if now - self.last_inference_time < max(0.2, self.capture_delay):
-            return
+            return False
         if not self.inference_lock.acquire(False):
             rospy.loginfo_throttle(2.0, "Action recognition is still running")
-            return
+            return False
 
         self.last_inference_time = now
         worker = threading.Thread(
@@ -1485,11 +2112,78 @@ class PoseActionRecognitionNode:
             daemon=True,
         )
         worker.start()
+        return True
+
+    def trigger_callback(self, message):
+        """外部触发一次识别，供任务节点按航点调用。
+
+        payload 支持两种写法（都通过 trigger_topic 发 std_msgs/String）：
+          "x1,y1,x2,y2"                                只看这个 ROI
+          {"request_id":"...","roi":"x1,y1,x2,y2"}     JSON（推荐，便于配对结果）
+        留空则按全画面 / 静态 owner_roi 处理。
+        """
+        payload = (message.data or "").strip()
+        request_id = ""
+        roi = None
+        if payload.startswith("{"):
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError) as exc:
+                rospy.logwarn("Invalid action trigger payload: %s", exc)
+                data = None
+            if isinstance(data, dict):
+                request_id = str(data.get("request_id", "") or "")
+                roi = parse_owner_roi(data.get("roi"))
+        else:
+            roi = parse_owner_roi(payload)
+
+        with self.request_lock:
+            self.pending_request_id = request_id
+            self.pending_roi = roi
+
+        if self.request_inference("trigger"):
+            rospy.loginfo(
+                "Action trigger accepted: request_id=%s roi=%s", request_id or "(none)", roi
+            )
+            return
+
+        # 忙或还没预热完：立刻回一条带 request_id 的错误结果，避免调用方干等
+        rospy.logwarn(
+            "Action trigger rejected (busy or not warm yet): request_id=%s",
+            request_id or "(none)",
+        )
+        self.publish_trigger_error(request_id, "action recognizer busy")
+
+    def publish_trigger_error(self, request_id, reason):
+        self.result_pub.publish(
+            String(
+                data=json.dumps(
+                    {
+                        "request_id": request_id,
+                        "action": ACTION_UNKNOWN,
+                        "place": PLACE_UNKNOWN,
+                        "recognizer": "yolo_pose",
+                        "error": reason,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
 
     def _inference_worker(self, reason):
         try:
-            rospy.loginfo("Recognizing action (%s)", reason)
-            if reason != "startup":
+            with self.request_lock:
+                self.active_request_id = self.pending_request_id
+                self.pending_request_id = ""
+                self.active_roi = self.pending_roi
+                self.pending_roi = None
+            request_id = self.active_request_id
+            rospy.loginfo(
+                "Recognizing action (%s) request_id=%s", reason, request_id or "(none)"
+            )
+            self.clear_result_overlay()
+            # 外部触发（任务节点调用）由调用方负责说话，这里不抢话
+            if reason not in ("startup", "trigger"):
                 self.speak(self.startup_speech)
 
             started = time.time()
@@ -1513,16 +2207,24 @@ class PoseActionRecognitionNode:
                 pose_features,
             )
             total_elapsed = time.time() - started
-            final_pose_is_horizontal = bool(
-                pose_features and pose_features[-1].get("lying_like")
-            )
+            final_pose_is_horizontal = final_posture_is_horizontal(pose_features)
             action, place, ground_fallen, elevated_lying = merge_pose_action_result(
                 pose_action,
                 ground_relation,
                 final_pose_is_horizontal,
             )
             speech = result_to_speech(action, place)
+            self.set_result_overlay(
+                pose_features,
+                action,
+                place,
+                pose_confidence,
+                pose_action,
+                ground_relation,
+            )
             result = {
+                "request_id": request_id,
+                "triggered": bool(request_id),
                 "action": action,
                 "place": place,
                 "speech": speech,
@@ -1548,18 +2250,29 @@ class PoseActionRecognitionNode:
                 "owner_roi_applied": any(roi is not None for roi in self.capture_rois),
             }
             self.result_pub.publish(String(data=json.dumps(result, ensure_ascii=False)))
+            def _fmt(value):
+                return "%.2f" % value if value is not None else "n/a"
+
             rospy.loginfo(
-                "Action: %s, place: %s, frames: %d, pose=%s(%.2f), ground=%s, capture: %.2fs, total: %.2fs",
+                "Action: %s, place: %s, frames: %d, pose=%s(%.2f), "
+                "ground=%s(median=%s p20=%s local=%s above=%s confident=%s), "
+                "capture: %.2fs, total: %.2fs",
                 action,
                 place,
                 len(frames),
                 pose_action,
                 pose_confidence,
                 ground_relation.get("status", "unknown"),
+                _fmt(ground_relation.get("surface_height_median")),
+                _fmt(ground_relation.get("surface_height_p20")),
+                _fmt(ground_relation.get("local_floor_height_p15")),
+                _fmt(ground_relation.get("height_above_local_floor")),
+                ground_relation.get("ground_confident"),
                 capture_elapsed,
                 total_elapsed,
             )
-            self.speak(speech)
+            if not request_id or self.speak_on_trigger:
+                self.speak(speech)
         except Exception as exc:
             rospy.logerr("Action recognition failed: %s", exc)
             try:
@@ -1568,9 +2281,14 @@ class PoseActionRecognitionNode:
                 rospy.logerr("Could not report recognition failure by voice: %s", speech_exc)
         finally:
             self.set_capture_status("")
+            # 自动重复从“本轮结束”开始计时，保证结果画面有完整展示时间，
+            # 避免识别任务首尾相接把标注画面立刻清掉。
+            self.last_inference_time = time.time()
             self.inference_lock.release()
 
     def speak(self, text):
+        if not self.speak_enabled:
+            return
         text = (text or "").strip()
         if text:
             deadline = time.time() + max(0.0, self.say_wait_timeout)

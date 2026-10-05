@@ -124,7 +124,20 @@ import torchreid; print('torchreid', torchreid.__version__)
 "
 ```
 
-> ReID 专用权重 `models/reid/osnet_x0_25_msmt17.pth` 已随仓库提供。
+> **ReID 专用权重需要自己放一份**：`<包>/models/reid/osnet_x0_25_msmt17.pth`
+> （`wpb_task1_owner_search` 和 `wpb_service_robot` 各需要一份）。
+> 它体积较大（约 9MB），没有随仓库提交，获取方式二选一：
+>
+> 1. 从本仓库的历史提交里取（该文件曾经提交过）：
+>    ```
+>    git show e7ce74f:ros_packages/wpb_task1_owner_search/models/reid/osnet_x0_25_msmt17.pth \
+>      > ros_packages/wpb_task1_owner_search/models/reid/osnet_x0_25_msmt17.pth
+>    ```
+> 2. 用 torchreid 自己下载：它是 `osnet_x0_25` 在 MSMT17 上的预训练权重，
+>    由 torchreid 的 `download_model('osnet_x0_25', 'msmt17')` 取得，改名后放到上面的路径。
+>
+> 缺少这个权重时，程序会回退到 ImageNet 预训练权重，**认人的区分度会明显变差**
+> （实测两位不同的人相似度从 0.57 涨到 0.75），所以务必放对。
 
 ---
 

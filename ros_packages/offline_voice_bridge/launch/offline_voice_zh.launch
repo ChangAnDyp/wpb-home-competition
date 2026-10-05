@@ -32,6 +32,14 @@
   <arg name="asr_capture_source" default="" />
   <arg name="asr_capture_volume" default="100%" />
   <arg name="asr_capture_gain" default="1.0" />
+  <!-- ASR 切片长度（秒）。识别延迟 ≈ 切片长度 + 推理时间，
+       所以切片越长越迟钝；调小可以明显加快问答节奏，代价是识别
+       次数变多。比赛链路里用 2 秒（见 task1_owner_search_real.launch）。 -->
+  <arg name="asr_window_seconds" default="4.0" />
+  <!-- 声学级静音：TTS 播报期间 ASR 停止录音（由 offline_tts_node 通过
+       /voice/speaking 通知）。默认开启；若出现"完全听不到"的情况，
+       用它一键关闭，回到"照录 + 文本级回声过滤"的老行为。 -->
+  <arg name="asr_tts_squelch" default="true" />
 
   <arg name="say_topic" default="/voice/say" />
   <arg name="asr_topic" default="/voice/asr_text" />
@@ -63,5 +71,7 @@
     <param name="input_gain" value="$(arg asr_capture_gain)" />
     <param name="energy_threshold" value="$(arg asr_energy_threshold)" />
     <param name="model_path" value="$(arg asr_model_path)" />
+    <param name="window_seconds" value="$(arg asr_window_seconds)" />
+    <param name="squelch_during_tts" value="$(arg asr_tts_squelch)" />
   </node>
 </launch>

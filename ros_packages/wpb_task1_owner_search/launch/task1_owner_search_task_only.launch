@@ -19,6 +19,15 @@
   <arg name="detections_topic" default="/perception/person_detections_2d" />
   <arg name="points_topic" default="/kinect2/qhd/points" />
   <arg name="owner_image_path" default="$(find wpb_task1_owner_search)/data/owner" />
+  <!--
+    现场注册（不依赖预先放照片）。real.launch 里声明了这三个参数，
+    但本文件原本没有转发，导致命令行传 owner_enrollment_enabled:=true
+    被 roslaunch 静默忽略、节点仍按“读照片”的路径走。
+    这里补上声明并往下透传。
+  -->
+  <arg name="owner_enrollment_enabled" default="false" />
+  <arg name="owner_enrollment_capture_seconds" default="5.0" />
+  <arg name="owner_enrollment_min_samples" default="6" />
   <arg name="action_llm_url" default="http://127.0.0.1:11434/api/chat" />
   <!-- 与 task1_owner_search_real.launch / config yaml 保持一致 -->
   <arg name="action_llm_model" default="qwen3-vl:2b-instruct" />
@@ -58,6 +67,9 @@
     <arg name="detections_topic" value="$(arg detections_topic)" />
     <arg name="points_topic" value="$(arg points_topic)" />
     <arg name="owner_image_path" value="$(arg owner_image_path)" />
+    <arg name="owner_enrollment_enabled" value="$(arg owner_enrollment_enabled)" />
+    <arg name="owner_enrollment_capture_seconds" value="$(arg owner_enrollment_capture_seconds)" />
+    <arg name="owner_enrollment_min_samples" value="$(arg owner_enrollment_min_samples)" />
     <arg name="action_llm_url" value="$(arg action_llm_url)" />
     <arg name="action_llm_model" value="$(arg action_llm_model)" />
     <arg name="action_sample_seconds" value="$(arg action_sample_seconds)" />

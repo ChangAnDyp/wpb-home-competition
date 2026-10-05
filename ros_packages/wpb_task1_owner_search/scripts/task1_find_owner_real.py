@@ -63,15 +63,8 @@ def load_qwen_action_core(configured_path=""):
         candidates.append(os.path.expanduser(str(configured_path)))
     candidates.extend(
         [
-            os.path.join(
-                script_dir,
-                "..",
-                "..",
-                "offline_voice_bridge",
-                "scripts",
-                "qwen_action_recognition_node.py",
-            ),
-            "/home/dyp/catkin_ws/src/offline_voice_bridge/scripts/qwen_action_recognition_node.py",
+            # 动作识别核心已搬进本包 scripts 目录，与本文件同级
+            os.path.join(script_dir, "qwen_action_recognition_node.py"),
         ]
     )
     core_path = next((os.path.abspath(path) for path in candidates if os.path.exists(path)), "")
@@ -111,6 +104,10 @@ class RealOwnerSearchBeforeAction:
         self.latest_odom_linear_speed = None
         self.latest_odom_time = None
         self.owner_track_center = None
+        # 主人锁定：一旦确认主人，动作识别就只分析他所在的那个框，
+        # 找不到他就跳过这一帧（而不是退回去分析画面里的别人）。
+        self.owner_lock_enabled = bool(rospy.get_param("~owner_lock_enabled", True))
+        self.owner_locked = False
         self.last_pointcloud_reason = ""
         self.last_approach_failure_reason = ""
 
@@ -224,6 +221,14 @@ class RealOwnerSearchBeforeAction:
         self.scan_duration = float(rospy.get_param("~scan_duration", 13.0))
         self.scan_total_angle = float(rospy.get_param("~scan_total_angle", math.pi))
         self.scan_timeout = float(rospy.get_param("~scan_timeout", 35.0))
+        # 单次里程计读数之间允许的"真实转动"上限（弧度）。
+        # 原代码硬编码 0.7 rad（40°），且累加时取绝对值 —— 里程计噪声
+        # 正负抖动全部被当成"真的在转"，实测只转 30~50° 就被判成转满
+        # 180° 提前结束。这里改成带符号累加 + 更紧的门限（与
+        # owner_voice_reid_test.py 的扫描保持一致）。
+        self.scan_max_yaw_step = max(
+            0.02, float(rospy.get_param("~scan_max_yaw_step", 0.25))
+        )
         self.scan_after_arrival_delay = float(rospy.get_param("~scan_after_arrival_delay", 0.2))
         self.scan_return_to_owner = bool(rospy.get_param("~scan_return_to_owner", True))
         self.return_angular_speed = abs(float(rospy.get_param("~return_angular_speed", 0.25)))
@@ -273,6 +278,9 @@ class RealOwnerSearchBeforeAction:
             0.0, float(rospy.get_param("~action_warmup_wait_timeout", 30.0))
         )
         self.action_pose_enabled = bool(rospy.get_param("~action_pose_enabled", True))
+        # 只用 YOLO-Pose + 点云高度做动作识别，完全不调用 Qwen 视觉模型
+        # （省 CPU/内存，也不再需要 Ollama 常驻）。设为 false 可回退到 Qwen 融合。
+        self.action_pose_only = bool(rospy.get_param("~action_pose_only", True))
         self.action_pointcloud_enabled = bool(
             rospy.get_param("~action_pointcloud_enabled", True)
         )
@@ -314,6 +322,20 @@ class RealOwnerSearchBeforeAction:
         )
         self.action_pointcloud_frame_mode = rospy.get_param(
             "~action_pointcloud_frame_mode", "auto"
+        )
+        # 相机离地高度自动标定：拆装机器人后相机会变高变低，
+        # 开机时用点云现场测一次，比写死的 0.85 可靠。
+        self.auto_action_camera_height = bool(
+            rospy.get_param("~auto_action_camera_height", True)
+        )
+        self.action_camera_height_timeout = max(
+            1.0, float(rospy.get_param("~action_camera_height_timeout", 8.0))
+        )
+        self.action_camera_height_min = float(
+            rospy.get_param("~action_camera_height_min", 0.30)
+        )
+        self.action_camera_height_max = float(
+            rospy.get_param("~action_camera_height_max", 1.80)
         )
         self.action_min_keypoint_conf = float(rospy.get_param("~action_min_keypoint_conf", 0.25))
         self.action_max_det = int(rospy.get_param("~action_max_det", 4))
@@ -804,6 +826,26 @@ class RealOwnerSearchBeforeAction:
         self.say_repeat_count = max(1, int(rospy.get_param("~say_repeat_count", 1)))
         self.say_repeat_interval = float(rospy.get_param("~say_repeat_interval", 0.25))
         self.say_after_publish_delay = float(rospy.get_param("~say_after_publish_delay", 1.0))
+        # 语音回声抑制：say() 只把文本发到 /voice/say 就返回，TTS 是异步播放的。
+        # 如果此时立刻开始听麦克风，会把机器人自己的声音转成文字（实测出现过
+        # “您说的是账3，请确认”被当成用户确认）。这里按文本长度估算播放时长，
+        # 在这段时间内丢弃收到的 ASR 文本。
+        self.tts_speech_chars_per_second = max(
+            1.0, float(rospy.get_param("~tts_speech_chars_per_second", 5.0))
+        )
+        self.tts_squelch_pad_seconds = max(
+            0.0, float(rospy.get_param("~tts_squelch_pad_seconds", 0.8))
+        )
+        self.asr_squelch_until = 0.0
+        # 时间抑制不够用：ASR 是按窗口切片识别的，机器人说完一句话要等
+        # 一个窗口（约 4~5 秒）才会把这段回声发布出来，早就越过了
+        # asr_squelch_until。所以再加一层【文本级】回声过滤：
+        # 把收到的文字和最近说过的提示语比公共子串，像回声的直接丢掉。
+        self.asr_echo_guard_seconds = max(
+            0.0, float(rospy.get_param("~asr_echo_guard_seconds", 15.0))
+        )
+        self.asr_echo_min_lcs = max(2, int(rospy.get_param("~asr_echo_min_lcs", 4)))
+        self.recent_spoken_texts = []
 
         self.owner_reference_images = []
         self.owner_name = ""
@@ -934,6 +976,71 @@ class RealOwnerSearchBeforeAction:
         return parsed
 
     @staticmethod
+    def compact_speech_text(text):
+        """去掉空白和标点，只留下用于比对的字。"""
+        compact = re.sub(r"\s+", "", str(text or ""))
+        return re.sub(r"[，。！？,.!?、；;：:“”\"'()（）]", "", compact)
+
+    @staticmethod
+    def longest_common_substring_length(left, right):
+        """两段文本的最长公共子串长度（按字）。文本很短，一维 DP 就够。"""
+        text_left = str(left or "")
+        text_right = str(right or "")
+        if not text_left or not text_right:
+            return 0
+        previous = [0] * (len(text_right) + 1)
+        best = 0
+        for left_char in text_left:
+            current = [0] * (len(text_right) + 1)
+            for index, right_char in enumerate(text_right, start=1):
+                if left_char == right_char:
+                    current[index] = previous[index - 1] + 1
+                    if current[index] > best:
+                        best = current[index]
+            previous = current
+        return best
+
+    def remember_spoken_text(self, text):
+        """记住机器人刚说过的话，供 is_likely_echo 比对。"""
+        compact = self.compact_speech_text(text)
+        if not compact:
+            return
+        now = time.time()
+        history = list(getattr(self, "recent_spoken_texts", []) or [])
+        history.append((now, compact))
+        guard = float(getattr(self, "asr_echo_guard_seconds", 15.0))
+        keep_after = now - max(1.0, guard * 2.0)
+        self.recent_spoken_texts = [
+            item for item in history if float(item[0]) >= keep_after
+        ][-12:]
+
+    def is_likely_echo(self, text):
+        """
+        判断一段 ASR 文本是不是机器人自己提示语的回声。
+
+        实测现场注册时会这样：机器人问“请在我前方说出您的名字”，隔 4~5 秒
+        被识别成“不放说出名的名词”，又被当成用户报的名字，3 次机会全被
+        自己的回声耗光（最后报真名时已经没机会了）。
+
+        真实回答都很短（“张三”“确认”“重来”），和提示语的公共子串也短，
+        所以用“公共子串足够长 + 自身足够长”就能把回声挑出来，不会误杀回答。
+        """
+        compact = self.compact_speech_text(text)
+        if len(compact) < 4:
+            return False
+        guard = float(getattr(self, "asr_echo_guard_seconds", 15.0))
+        if guard <= 0.0:
+            return False
+        min_lcs = max(2, int(getattr(self, "asr_echo_min_lcs", 4)))
+        now = time.time()
+        for spoken_time, spoken in list(getattr(self, "recent_spoken_texts", []) or []):
+            if now - float(spoken_time) > guard:
+                continue
+            if self.longest_common_substring_length(compact, spoken) >= min_lcs:
+                return True
+        return False
+
+    @staticmethod
     def normalize_owner_name(text):
         compact = re.sub(r"\s+", "", str(text or ""))
         compact = re.sub(r"[，。！？,.!?、；;：:“”\"'()（）]", "", compact)
@@ -957,7 +1064,35 @@ class RealOwnerSearchBeforeAction:
         candidate = re.sub(r"[^一-龥A-Za-z0-9·_-]", "", candidate)
         if not candidate or len(candidate) > 12:
             return ""
-        if any(marker in candidate for marker in ("名字", "姓名", "什么", "叫我")):
+        if any(
+            marker in candidate
+            for marker in ("名字", "姓名", "什么", "叫我", "说", "回答", "吗", "呢")
+        ):
+            return ""
+        # “重来”“没有听清”这类是用户要求重说，不是名字；
+        # 不挡掉的话它会被当成一个名字，白白消耗一次注册机会。
+        if candidate in (
+            "重来",
+            "重新",
+            "重说",
+            "再说",
+            "再来",
+            "没有",
+            "没有听清",
+            "听不清",
+            "不是",
+            "不对",
+            "不知道",
+            "确认",
+            "正确",
+            "是的",
+            "好的",
+            "确定",
+        ):
+            return ""
+        # 单字（例如回声碎片“你”）不是名字，要求至少两个字；
+        # “我叫张三”这类带前缀的句子不受此限制。
+        if not prefix_match and len(candidate) < 2:
             return ""
         if not prefix_match and len(candidate) > 8:
             return ""
@@ -968,6 +1103,14 @@ class RealOwnerSearchBeforeAction:
         compact = re.sub(r"\s+", "", str(text or ""))
         compact = re.sub(r"[，。！？,.!?、；;：:“”\"'()（）]", "", compact)
         if not compact:
+            return None
+        # 先排除“机器人自己提示语”的回声。这类文本包含完整句式，
+        # 而真实回答都是短句；不加这层的话提示语结尾的“确认/重来”会被误判。
+        for echo_marker in ("正确请回答确认", "不正确请回答重来", "请确认这个名字",
+                            "请回答确认", "请回答重来"):
+            if echo_marker in compact:
+                return None
+        if len(compact) > 8:
             return None
         if compact in ("不是", "不对", "错了", "重新", "重说", "重来", "否"):
             return False
@@ -981,12 +1124,6 @@ class RealOwnerSearchBeforeAction:
             return True
         if compact.startswith(("不是", "不对", "错了", "重新", "重说", "重来", "否")):
             return False
-        if "正确请回答确认" in compact or "不正确请回答重来" in compact:
-            if compact.endswith("重来") and compact.count("重来") >= 2:
-                return False
-            if compact.endswith("确认") and compact.count("确认") >= 2:
-                return True
-            return None
         return None
 
     def current_asr_sequence(self):
@@ -1038,6 +1175,87 @@ class RealOwnerSearchBeforeAction:
             rate.sleep()
         return None, cursor
 
+    def enrollment_face_crops(self, image):
+        """产出用于注册的人脸检测输入图。
+
+        先试整图；整图找不到脸时，再按 YOLO 人体框 / 画面中上部裁剪。
+        原因：人站得稍远时，脸在 960x540 的画面里可能只有 20 像素左右，
+        InsightFace 直接整图检测会完全检不到（实测 0/6 就是这么来的）；
+        先裁剪放大相当于把脸放大 2-3 倍，检测率会高很多。
+        """
+        yield "full", image
+        height, width = image.shape[:2]
+
+        with self.lock:
+            detections = list(self.latest_detections)
+
+        best = None
+        best_area = 0.0
+        for det in detections:
+            name = getattr(det, "class_name", "")
+            if name and name != "person":
+                continue
+            w = float(getattr(det, "xmax", 0)) - float(getattr(det, "xmin", 0))
+            h = float(getattr(det, "ymax", 0)) - float(getattr(det, "ymin", 0))
+            if w > 0 and h > 0 and w * h > best_area:
+                best_area = w * h
+                best = det
+
+        if best is not None:
+            x0 = max(0, int(best.xmin))
+            x1 = min(width, int(best.xmax))
+            y0 = max(0, int(best.ymin))
+            y1 = min(height, int(best.ymin + (best.ymax - best.ymin) * 0.7))
+            if x1 - x0 >= 32 and y1 - y0 >= 32:
+                yield "person-upper", image[y0:y1, x0:x1]
+
+        # 兜底：画面中上部（人站在正前方时脸通常在这个区域）
+        cx0, cx1 = int(width * 0.20), int(width * 0.80)
+        cy0, cy1 = int(height * 0.02), int(height * 0.65)
+        if cx1 - cx0 >= 32 and cy1 - cy0 >= 32:
+            yield "center-upper", image[cy0:cy1, cx0:cx1]
+
+    def detect_enrollment_face(self, image):
+        """在整图/各裁剪图上找人脸，返回质量达标的那一张（找不到返回 None）。"""
+        need = self.owner_enrollment_min_face_size
+        for label, crop in self.enrollment_face_crops(image):
+            if crop is None or getattr(crop, "size", 0) == 0:
+                continue
+            try:
+                faces = self.face_app.get(crop)
+            except Exception as exc:
+                rospy.logwarn_throttle(2.0, "Owner enrollment face detection failed: %s", exc)
+                continue
+            if not faces:
+                continue
+            face = self.select_largest_face(faces)
+            bbox = getattr(face, "bbox", None)
+            if bbox is None or len(bbox) < 4:
+                continue
+            width = float(bbox[2]) - float(bbox[0])
+            height = float(bbox[3]) - float(bbox[1])
+            if min(width, height) < need:
+                rospy.loginfo_throttle(
+                    3.0,
+                    "Owner enrollment 检测到人脸但太小（%s: %.0fx%.0f，需 >=%d）",
+                    label,
+                    width,
+                    height,
+                    need,
+                )
+                continue
+            if len(faces) > 1:
+                rospy.logwarn_throttle(
+                    3.0, "Owner enrollment 画面里有 %d 张脸，取最大的那张", len(faces)
+                )
+            if label != "full":
+                rospy.loginfo_throttle(
+                    3.0, "Owner enrollment 整图未检出，改用 %s 裁剪后成功（%.0fx%.0f）",
+                    label, width, height,
+                )
+            return face
+        return None
+
     def capture_owner_face_embeddings(self):
         if not self.face_model_ready or self.face_app is None:
             raise RuntimeError("InsightFace model is not ready for owner enrollment")
@@ -1064,23 +1282,14 @@ class RealOwnerSearchBeforeAction:
                 continue
             last_image_time = float(image_time)
 
-            try:
-                faces = self.face_app.get(image)
-            except Exception as exc:
-                rospy.logwarn_throttle(2.0, "Owner enrollment face detection failed: %s", exc)
-                rate.sleep()
-                continue
-
-            if len(faces or []) != 1:
+            face = self.detect_enrollment_face(image)
+            if face is None:
                 rospy.logwarn_throttle(
                     2.0,
-                    "Owner enrollment requires exactly one visible face; detected=%d",
-                    len(faces or []),
+                    "Owner enrollment 未检测到可用人脸：请靠近相机（约 1 米）、正对镜头、光线充足",
                 )
                 rate.sleep()
                 continue
-
-            face = self.select_largest_face(faces)
             bbox = getattr(face, "bbox", None)
             if bbox is None or len(bbox) < 4:
                 rate.sleep()
@@ -1192,11 +1401,33 @@ class RealOwnerSearchBeforeAction:
             raise RuntimeError("owner name enrollment was not confirmed")
 
         self.owner_name = confirmed_name
-        self.say(
-            "好的，%s，请保持一个人站在我前方。我现在采集您的脸部特征。"
-            % self.owner_name
-        )
-        self.capture_owner_face_embeddings()
+        # 采脸失败就重试，而不是直接让节点崩掉（实测人站远一点就会 0/6 失败）
+        last_error = None
+        for attempt in range(self.owner_enrollment_retries):
+            if attempt == 0:
+                self.say(
+                    "好的，%s，请保持一个人站在我前方约一米处，正对镜头。"
+                    "我现在采集您的脸部特征。" % self.owner_name
+                )
+            else:
+                self.say("我没有看清您的脸，请靠近一点、正对镜头，我再试一次。")
+            try:
+                self.capture_owner_face_embeddings()
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                rospy.logwarn(
+                    "Owner face capture attempt %d/%d failed: %s",
+                    attempt + 1,
+                    self.owner_enrollment_retries,
+                    exc,
+                )
+        if last_error is not None:
+            raise RuntimeError(
+                "owner face enrollment failed after %d attempts: %s"
+                % (self.owner_enrollment_retries, last_error)
+            )
         self.say("主人注册完成，我记住您的名字是%s。" % self.owner_name)
 
     @staticmethod
@@ -1355,17 +1586,19 @@ class RealOwnerSearchBeforeAction:
                     self.action_conf,
                     self.action_iou,
                     max(1, self.action_max_det),
+                    self.action_half,
                 )
                 pose_ready, pose_message = self.qwen_pose_analyzer.initialize()
                 if pose_ready:
                     rospy.loginfo(
-                        "Qwen pose helper ready: model=%s device=%s",
+                        "Pose helper ready: model=%s device=%s half=%s",
                         pose_model_path,
                         self.action_device,
+                        self.action_half,
                     )
                 else:
                     self.qwen_pose_analyzer = None
-                    rospy.logwarn("Qwen pose helper disabled: %s", pose_message)
+                    rospy.logwarn("Pose helper disabled: %s", pose_message)
 
             if self.action_pointcloud_enabled:
                 self.qwen_pointcloud_analyzer = self.qwen_action_core.PointCloudGroundAnalyzer(
@@ -1383,17 +1616,30 @@ class RealOwnerSearchBeforeAction:
                     self.action_pointcloud_local_ground_padding,
                     self.action_pointcloud_elevated_delta,
                 )
+                self.calibrate_action_camera_height()
 
             self.action_ready = True
-            self.warmup_qwen_action_model()
-            rospy.loginfo(
-                "Owner Qwen action recognition ready: model=%s core=%s seconds=%.1f frames=%d llm_frames=%d",
-                self.action_llm_model,
-                self.qwen_action_core_path,
-                self.action_sample_seconds,
-                self.action_frame_count,
-                self.action_llm_frame_count,
-            )
+            if self.action_pose_only:
+                # 纯姿态模式：不预热 Qwen，也不让 Ollama 常驻占显存/内存。
+                self.qwen_warmup_done.set()
+                rospy.loginfo(
+                    "Owner action recognition ready: mode=YOLO-Pose only, "
+                    "model=%s core=%s seconds=%.1f frames=%d",
+                    self.action_model_path or "(core default)",
+                    self.qwen_action_core_path,
+                    self.action_sample_seconds,
+                    self.action_frame_count,
+                )
+            else:
+                self.warmup_qwen_action_model()
+                rospy.loginfo(
+                    "Owner Qwen action recognition ready: model=%s core=%s seconds=%.1f frames=%d llm_frames=%d",
+                    self.action_llm_model,
+                    self.qwen_action_core_path,
+                    self.action_sample_seconds,
+                    self.action_frame_count,
+                    self.action_llm_frame_count,
+                )
         except Exception as exc:
             self.qwen_action_core = None
             self.qwen_action_core_path = ""
@@ -1760,6 +2006,86 @@ class RealOwnerSearchBeforeAction:
         with self.lock:
             return self.latest_pointcloud, self.latest_pointcloud_time
 
+    def calibrate_action_camera_height(self):
+        """开机时用点云现场标定相机离地高度（拆装后高度会变）。"""
+        analyzer = self.qwen_pointcloud_analyzer
+        if analyzer is None or not self.action_pointcloud_enabled:
+            return False
+        if not self.auto_action_camera_height:
+            rospy.loginfo(
+                "Action camera-height auto-calibration disabled; using %.3f m",
+                analyzer.camera_height,
+            )
+            return False
+
+        deadline = time.time() + self.action_camera_height_timeout
+        samples = []
+        floor_lines = []
+        rate = rospy.Rate(5)
+        while not rospy.is_shutdown() and time.time() < deadline:
+            cloud, cloud_stamp = self.get_latest_action_pointcloud()
+            cloud_age = time.time() - cloud_stamp if cloud_stamp else None
+            if cloud is not None and (cloud_age is None or cloud_age <= 1.0):
+                value = analyzer.estimate_camera_height(cloud)
+                if value is not None:
+                    samples.append(value)
+                line = analyzer.estimate_floor_line(cloud)
+                if line is not None:
+                    floor_lines.append(line)
+                if len(samples) >= 5 and len(floor_lines) >= 3:
+                    break
+            rate.sleep()
+
+        if floor_lines:
+            # 相机俯视时地面在图像里不是水平线，用拟合出的地面线算"离地高度"，
+            # 这样床/地面的判断不再随距离漂移（这是之前误判的主因）。
+            slopes = sorted(value[0] for value in floor_lines)
+            intercepts = sorted(value[1] for value in floor_lines)
+            analyzer.floor_slope = slopes[len(slopes) // 2]
+            analyzer.floor_intercept = intercepts[len(intercepts) // 2]
+            rospy.loginfo(
+                "Action floor line calibrated: y = %.4f*z + %.4f "
+                "(implied camera pitch %.1f deg, samples=%d)",
+                analyzer.floor_slope,
+                analyzer.floor_intercept,
+                math.degrees(math.atan(-analyzer.floor_slope)),
+                len(floor_lines),
+            )
+
+        if not samples:
+            rospy.logwarn(
+                "Action camera-height auto-calibration failed; keeping %.3f m",
+                analyzer.camera_height,
+            )
+            return False
+
+        samples.sort()
+        value = samples[len(samples) // 2]
+        clamped = max(
+            self.action_camera_height_min,
+            min(self.action_camera_height_max, value),
+        )
+        if abs(clamped - value) > 1e-6:
+            rospy.logwarn(
+                "Measured action camera height %.3f m out of [%.2f, %.2f]; clamped",
+                value,
+                self.action_camera_height_min,
+                self.action_camera_height_max,
+            )
+        analyzer.camera_height = clamped
+        # 注意：任务节点里"估计主人位置（接近用）"走的是另一个参数
+        # lying_surface_camera_height，必须一起更新，否则接近时仍用旧高度。
+        self.lying_surface_camera_height = clamped
+        rospy.loginfo(
+            "Action camera height auto-calibrated: %.3f m "
+            "(samples=%d, raw=%.3f..%.3f; also applied to lying_surface_camera_height)",
+            clamped,
+            len(samples),
+            samples[0],
+            samples[-1],
+        )
+        return True
+
     def analyze_qwen_ground_relation(self, frame, pose_features):
         if not self.action_pointcloud_enabled or self.qwen_pointcloud_analyzer is None:
             return {"status": "unknown", "reason": "point cloud disabled"}
@@ -1780,6 +2106,21 @@ class RealOwnerSearchBeforeAction:
             anchors=anchors,
         )
 
+    def owner_action_frame_fallback(self, image, full_meta, reason):
+        """取景兜底：锁定主人时找不到他，就跳过这一帧，而不是去看别人。
+
+        房间里有多个人的时候，"退回整幅画面"会让姿态模型挑到离画面中心
+        最近的那个人——很可能不是主人。宁可这一帧不算，也不要算错人。
+        """
+        if self.owner_lock_enabled and self.owner_locked:
+            rospy.logwarn_throttle(
+                2.0,
+                "Owner lock: %s; skipping this action frame",
+                reason,
+            )
+            return None, None
+        return image, full_meta
+
     def snapshot_owner_action_image(self):
         with self.lock:
             if self.latest_image is None:
@@ -1796,8 +2137,10 @@ class RealOwnerSearchBeforeAction:
             "pose_target_center_norm": self.owner_track_center if self.owner_track_center is not None else 0.5,
         }
 
-        if not self.action_use_owner_roi or not detections:
+        if not self.action_use_owner_roi:
             return image, full_meta
+        if not detections:
+            return self.owner_action_frame_fallback(image, full_meta, "no person detected")
 
         best = None
         best_score = -1e9
@@ -1824,7 +2167,9 @@ class RealOwnerSearchBeforeAction:
                 best = (xmin, ymin, xmax, ymax, center_norm, float(det.center_x), det_center_y)
 
         if best is None:
-            return image, full_meta
+            return self.owner_action_frame_fallback(
+                image, full_meta, "locked owner not found in view"
+            )
 
         xmin, ymin, xmax, ymax, center_norm, det_center_x, det_center_y = best
         box_w = xmax - xmin
@@ -1837,7 +2182,7 @@ class RealOwnerSearchBeforeAction:
         cy2 = clamp(ymax + pad_y, 0, height - 1)
         crop = image[cy1:cy2, cx1:cx2]
         if crop.size == 0:
-            return image, full_meta
+            return self.owner_action_frame_fallback(image, full_meta, "empty owner crop")
 
         self.owner_track_center = center_norm
         crop_width = max(1.0, float(cx2 - cx1))
@@ -2334,6 +2679,42 @@ class RealOwnerSearchBeforeAction:
 
             if pose_action in ("waving", "sudden_fall"):
                 place = "floor" if pose_action == "sudden_fall" else "unknown"
+                if pose_action == "sudden_fall":
+                    # 高度判断：姿态上的“倒下过程”可能只是往床上/沙发上躺。
+                    # 先用点云确认支撑面高度，横躺在家具面上就改判为 lying。
+                    ground_relation = None
+                    try:
+                        ground_relation = self.analyze_qwen_ground_relation(
+                            full_frames[-1]
+                            if full_frames
+                            else (frames[-1] if frames else None),
+                            pose_features,
+                        )
+                    except Exception as exc:
+                        rospy.logwarn("Owner action height check failed: %s", exc)
+                    elevated_check = getattr(
+                        self.qwen_action_core, "relation_is_elevated", None
+                    )
+                    final_pose_is_horizontal = bool(
+                        pose_features and pose_features[-1].get("lying_like")
+                    )
+                    if (
+                        final_pose_is_horizontal
+                        and elevated_check is not None
+                        and elevated_check(ground_relation)
+                    ):
+                        rospy.loginfo(
+                            "Owner action height override: horizontal pose on elevated "
+                            "surface (status=%s, median=%s) -> lying instead of sudden_fall",
+                            ground_relation.get("status"),
+                            ground_relation.get("surface_height_median"),
+                        )
+                        pose_action = "lying"
+                        pose_confidence = max(float(pose_confidence), 0.60)
+                        pose_reason = "elevated-surface override: %s" % (
+                            ground_relation.get("reason", "")
+                        )
+                        place = "unknown"
                 total_elapsed = time.time() - started
                 self.last_owner_action_place = place
                 self.last_owner_action_result = {
@@ -2369,6 +2750,76 @@ class RealOwnerSearchBeforeAction:
                     total_elapsed,
                 )
                 return pose_action, float(pose_confidence), reason
+
+            if self.action_pose_only:
+                # 纯姿态模式：姿态结论 + 点云高度融合，不调用 Qwen 视觉模型。
+                rospy.loginfo(
+                    "Starting owner action point-cloud support-surface analysis "
+                    "(pose-only mode)"
+                )
+                ground_relation = self.analyze_qwen_ground_relation(
+                    full_frames[-1]
+                    if full_frames
+                    else (frames[-1] if frames else None),
+                    pose_features,
+                )
+                final_pose_is_horizontal = bool(
+                    pose_features and pose_features[-1].get("lying_like")
+                )
+                action, place, ground_fallen, elevated_lying = (
+                    self.qwen_action_core.merge_action_result(
+                        "unknown",
+                        "unknown",
+                        pose_action,
+                        ground_relation,
+                        final_pose_is_horizontal,
+                    )
+                )
+                total_elapsed = time.time() - started
+                self.last_owner_action_place = place
+                self.last_owner_action_result = {
+                    "action": action,
+                    "place": place,
+                    "recognizer": "yolo_pose_only",
+                    "pose_action": pose_action,
+                    "pose_confidence": round(float(pose_confidence), 3),
+                    "pose_reason": pose_reason,
+                    "pose_feature_count": len(pose_features),
+                    "ground_relation": ground_relation,
+                    "ground_fallen": ground_fallen,
+                    "elevated_lying": elevated_lying,
+                    "capture_sec": round(capture_elapsed, 3),
+                    "total_sec": round(total_elapsed, 3),
+                    "frame_count": len(frames),
+                    "llm_frame_count": 0,
+                }
+                confidence = float(pose_confidence)
+                if action == "lying" and elevated_lying:
+                    confidence = max(confidence, 0.60)
+                reason = (
+                    "pose_only: pose=%s(%.2f); ground=%s(median=%s); frames=%d; total=%.2fs"
+                    % (
+                        pose_action,
+                        pose_confidence,
+                        ground_relation.get("status", "unknown"),
+                        ground_relation.get("surface_height_median"),
+                        len(frames),
+                        total_elapsed,
+                    )
+                )
+                rospy.loginfo(
+                    "Owner pose-only action verdict: action=%s place=%s pose=%s(%.2f) "
+                    "ground=%s(median=%s) frames=%d total=%.2fs",
+                    action,
+                    place,
+                    pose_action,
+                    pose_confidence,
+                    ground_relation.get("status", "unknown"),
+                    ground_relation.get("surface_height_median"),
+                    len(frames),
+                    total_elapsed,
+                )
+                return action, confidence, reason
 
             warmup_ready = self.wait_for_qwen_action_warmup()
             if not warmup_ready and not self.qwen_warmup_done.is_set():
@@ -2605,7 +3056,19 @@ class RealOwnerSearchBeforeAction:
         with self.lock:
             entries = [entry for entry in self.asr_history if entry["sequence"] > sequence_after]
         if not entries:
-            return "", sequence_after
+            return "", int(sequence_after)
+        # 游标推进到“读到的最后一条”，这样被丢掉的回声不会在下一轮被重复读取
+        last_sequence = int(entries[-1]["sequence"])
+        # 丢弃“机器人正在说话”期间录到的文本（回声），否则自己的提示语会被当成回答
+        squelch = float(getattr(self, "asr_squelch_until", 0.0))
+        if squelch > 0.0:
+            entries = [entry for entry in entries if float(entry.get("time", 0.0)) > squelch]
+        # 再按文本内容滤掉提示语回声（ASR 有约一个窗口的发布延迟，时间抑制挡不住）
+        entries = [
+            entry for entry in entries if not self.is_likely_echo(entry.get("text", ""))
+        ]
+        if not entries:
+            return "", last_sequence
 
         parts = []
         for entry in entries:
@@ -2613,7 +3076,7 @@ class RealOwnerSearchBeforeAction:
             if text:
                 parts.append(text)
         transcript = " ".join(parts).strip()
-        return transcript, int(entries[-1]["sequence"])
+        return transcript, last_sequence
 
     @staticmethod
     def write_pcm_wav(path, raw_audio, sample_rate, channels):
@@ -3890,6 +4353,21 @@ class RealOwnerSearchBeforeAction:
     def set_yolo_paused(self, paused):
         self.pause_yolo_pub.publish(Bool(data=bool(paused)))
 
+    def resume_yolo_on_shutdown(self):
+        """
+        节点被 Ctrl+C / 调试面板的停止按钮掐掉时，把 YOLO-World 恢复回来。
+
+        任务节点在做动作识别和电器开关交互时会暂停 YOLO-World（省 GPU），
+        正常结束时会在 finally 里恢复；但如果节点是被强制停掉的，就来不及
+        恢复，YOLO 会一直停在“暂停”，之后任何依赖人体检测的节点都会拿到
+        空数据（实测：owner_voice_reid_test 报 detections=False）。
+        """
+        try:
+            self.pause_yolo_pub.publish(Bool(data=False))
+            time.sleep(0.2)
+        except Exception:
+            pass
+
     def wait_for_tts_subscriber(self):
         if not self.say_wait_for_subscribers:
             return True
@@ -3908,6 +4386,15 @@ class RealOwnerSearchBeforeAction:
             self.say_pub.publish(String(data=text))
             if index + 1 < self.say_repeat_count and self.say_repeat_interval > 0:
                 rospy.sleep(self.say_repeat_interval)
+        # 记录“机器人正在说话”的时间窗，期间收到的 ASR 文本会被丢弃，
+        # 避免把自己的提示语（例如结尾的“确认”）当成用户回答。
+        # 同时把这句话记进“刚说过的话”，供文本级回声过滤比对。
+        self.remember_spoken_text(text)
+        speak_seconds = len(str(text)) / self.tts_speech_chars_per_second
+        self.asr_squelch_until = max(
+            self.asr_squelch_until,
+            time.time() + speak_seconds + self.tts_squelch_pad_seconds,
+        )
         delay = self.say_after_publish_delay if hold is None else float(hold)
         if delay > 0:
             rospy.sleep(delay)
@@ -5166,11 +5653,20 @@ class RealOwnerSearchBeforeAction:
         decision, score, reason = self.verify_candidate_with_face(candidate)
         if decision is True:
             return True, score, reason
+        if self.allow_unverified_owner:
+            # 调试开关：允许"未核验的主人"。
+            # 注意：这里连"人脸算出低分"的情况也一并接受——目的是单独测试
+            # 接近 / 交互等后续环节，不依赖人脸库。正式比赛必须保持 false。
+            rospy.logwarn(
+                "Accepting UNVERIFIED owner candidate "
+                "(face_decision=%s similarity=%s reason=%s); hardware debug only",
+                decision,
+                score,
+                reason,
+            )
+            return True, float(candidate.get("score", 0.0)), "unverified debug accept"
         if decision is False:
             return False, score, reason
-        if self.allow_unverified_owner:
-            rospy.logwarn("Accepting unverified owner candidate for hardware debug only: %s", reason)
-            return True, float(candidate.get("score", 0.0)), "unverified debug accept"
         return False, score, reason
 
     def wait_for_odom_yaw(self, timeout=3.0):
@@ -5238,6 +5734,7 @@ class RealOwnerSearchBeforeAction:
             if accepted:
                 det = candidate["det"]
                 self.owner_track_center = float(det.center_x) / float(candidate["image_width"])
+                self.owner_locked = True
                 rospy.loginfo(
                     "Owner accepted at bbox=(%d,%d,%d,%d), confidence=%.2f reason=%s",
                     det.xmin,
@@ -5313,7 +5810,11 @@ class RealOwnerSearchBeforeAction:
             self.scan_angular_speed,
             self.odom_topic,
         )
-        while not rospy.is_shutdown() and rotated_angle < self.scan_total_angle and time.time() < deadline:
+        while (
+            not rospy.is_shutdown()
+            and abs(rotated_angle) < self.scan_total_angle
+            and time.time() < deadline
+        ):
             twist = Twist()
             twist.angular.z = self.scan_angular_speed
             self.cmd_pub.publish(twist)
@@ -5321,15 +5822,18 @@ class RealOwnerSearchBeforeAction:
             current_yaw = self.get_latest_yaw()
             if current_yaw is not None:
                 delta = signed_angle_diff(current_yaw, last_yaw)
-                if abs(delta) < 0.7:
-                    rotated_angle += abs(delta)
+                if abs(delta) < self.scan_max_yaw_step:
+                    # 带符号累加：里程计噪声正负对称，累加后自然抵消。
+                    # 写成 abs(delta) 会把噪声累加成"转动量"，导致实际只转
+                    # 几十度就被判成转满而提前结束（已实测到这个问题）。
+                    rotated_angle += delta
                 last_yaw = current_yaw
 
             now = time.time()
             rospy.loginfo_throttle(
                 3.0,
                 "Owner scan rotated %.0f / %.0f deg",
-                math.degrees(rotated_angle),
+                math.degrees(abs(rotated_angle)),
                 math.degrees(self.scan_total_angle),
             )
             if now - last_collect_time >= self.candidate_collection_interval:
@@ -5351,10 +5855,10 @@ class RealOwnerSearchBeforeAction:
             rate.sleep()
 
         self.stop_base()
-        if rotated_angle < self.scan_total_angle:
+        if abs(rotated_angle) < self.scan_total_angle:
             rospy.logwarn(
                 "Owner scan stopped before full angle: %.0f / %.0f deg",
-                math.degrees(rotated_angle),
+                math.degrees(abs(rotated_angle)),
                 math.degrees(self.scan_total_angle),
             )
 
@@ -5995,6 +6499,7 @@ class RealOwnerSearchBeforeAction:
         self.waypoint_name = str(waypoint_name).strip()
         waypoint_label = self.waypoint_display_name(self.waypoint_name)
         self.owner_track_center = None
+        self.owner_locked = False
         self.last_pointcloud_reason = ""
         self.last_approach_failure_reason = ""
 
@@ -6086,6 +6591,8 @@ class RealOwnerSearchBeforeAction:
         return True
 
     def run(self):
+        # 被强制停止时也要把 YOLO-World 恢复回来，否则检测会一直停在暂停状态
+        rospy.on_shutdown(self.resume_yolo_on_shutdown)
         self.set_yolo_paused(False)
         self.rename_exit_waypoint_alias_if_needed()
         self.wait_for_hardware_inputs()

@@ -28,3 +28,6 @@ logs/
 **/models/whisper/
 *.tar.zst
 *.tar.gz
+
+# 行人重识别权重（体积大，按 INSTALL.md 单独下载）
+**/models/reid/*.pth

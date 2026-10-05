@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 启动本机 Ollama 服务（动作识别用的视觉模型跑在它上面）
 #
-# 用法：bash ~/competition/start_ollama.sh
+# 用法：bash ~/catkin_ws/competition/start_ollama.sh
 #
 # 说明：
 #   - ollama 安装在 ~/.local，没有走系统包管理，所以要显式指定路径。

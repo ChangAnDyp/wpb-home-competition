@@ -104,10 +104,12 @@ def load_asr_model(args):
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
-        raise RuntimeError(
-            "faster-whisper is not installed. Run offline_voice_bridge/tools/setup_offline_voice.sh first. %s"
-            % exc
-        )
+        # 电平测试是这个工具的主要用途，不该因为缺一个可选的 ASR 依赖就整个跑不起来。
+        # 装不上就降级成"只看电平"。
+        print("提示：faster-whisper 未安装 -> 跳过语音识别，只显示电平（这不影响判断音量）。")
+        print("      想同时看识别结果，先跑 offline_voice_bridge/tools/setup_offline_voice.sh")
+        print("      原始错误：%s" % exc)
+        return None
 
     print("Loading Chinese ASR model: %s (%s/%s)" % (args.model_size, args.asr_device, args.compute_type))
     start = time.time()

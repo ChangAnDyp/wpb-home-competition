@@ -1,5 +1,10 @@
 <launch>
   <arg name="show_yolo_viewer" default="false" />
+  <!-- 启动 YOLO-World 行人检测节点。③d 那条流程改用姿态模型做人体检测
+       （YOLO-World 对躺姿几乎检不出来），可以传 start_yolo:=false 把它
+       停掉，省一个 GPU 进程。原来这里写死 true 且未声明，命令行传参会被
+       静默忽略 —— 必须声明出来才生效。 -->
+  <arg name="start_yolo" default="true" />
   <arg name="yolo_output" default="log" />
   <arg name="yolo_respawn" default="true" />
   <arg name="yolo_respawn_delay" default="2.0" />
@@ -15,9 +20,20 @@
   <arg name="asr_capture_volume" default="150%" />
   <arg name="asr_capture_gain" default="2.0" />
   <arg name="asr_energy_threshold" default="80" />
+  <arg name="asr_window_seconds" default="2.0" />
+  <!-- 声学级静音：TTS 播报期间 ASR 暂停录音。
+       排查"完全听不到语音"时可传 asr_tts_squelch:=false 关闭。 -->
+  <arg name="asr_tts_squelch" default="true" />
+  <!-- TTS 语速（Piper length_scale，越小越快，1.0 = 原速） -->
+  <arg name="tts_length_scale" default="1.0" />
   <arg name="map" default="$(find wpb_home_tutorials)/maps/map.yaml" />
   <arg name="waypoint_file" default="/home/$(env USER)/waypoints.xml" />
   <arg name="device" default="cuda:0" />
+
+  <!-- 现场注册相关（原文件未声明，导致命令行无法覆盖） -->
+  <arg name="owner_enrollment_enabled" default="false" />
+  <arg name="owner_enrollment_capture_seconds" default="5.0" />
+  <arg name="owner_enrollment_min_samples" default="6" />
 
   <!--
     下面这些参数原上游没有在这里声明，导致命令行传
@@ -40,7 +56,7 @@
 
   <include file="$(find wpb_task1_owner_search)/launch/task1_owner_search_real.launch">
     <arg name="start_robot" value="true" />
-    <arg name="start_yolo" value="true" />
+    <arg name="start_yolo" value="$(arg start_yolo)" />
     <arg name="show_yolo_viewer" value="$(arg show_yolo_viewer)" />
     <arg name="yolo_output" value="$(arg yolo_output)" />
     <arg name="yolo_respawn" value="$(arg yolo_respawn)" />
@@ -56,11 +72,17 @@
     <arg name="asr_capture_volume" value="$(arg asr_capture_volume)" />
     <arg name="asr_capture_gain" value="$(arg asr_capture_gain)" />
     <arg name="asr_energy_threshold" value="$(arg asr_energy_threshold)" />
+    <arg name="asr_window_seconds" value="$(arg asr_window_seconds)" />
+    <arg name="asr_tts_squelch" value="$(arg asr_tts_squelch)" />
+    <arg name="tts_length_scale" value="$(arg tts_length_scale)" />
     <arg name="start_task" value="false" />
     <arg name="start_rviz" value="$(arg start_rviz)" />
     <arg name="map" value="$(arg map)" />
     <arg name="waypoint_file" value="$(arg waypoint_file)" />
     <arg name="device" value="$(arg device)" />
+    <arg name="owner_enrollment_enabled" value="$(arg owner_enrollment_enabled)" />
+    <arg name="owner_enrollment_capture_seconds" value="$(arg owner_enrollment_capture_seconds)" />
+    <arg name="owner_enrollment_min_samples" value="$(arg owner_enrollment_min_samples)" />
     <arg name="start_base" value="$(arg start_base)" />
     <arg name="start_lidar" value="$(arg start_lidar)" />
     <arg name="start_kinect" value="$(arg start_kinect)" />

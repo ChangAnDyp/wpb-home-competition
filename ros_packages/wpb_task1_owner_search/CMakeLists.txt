@@ -21,6 +21,7 @@ catkin_package(
 )
 
 catkin_install_python(PROGRAMS
+  scripts/qwen_action_recognition_node.py
   scripts/owner_voice_reid_test.py
   scripts/owner_voice_reid_optimized.py
   scripts/person_reid_owner_test.py

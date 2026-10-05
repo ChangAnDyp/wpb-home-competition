@@ -11,6 +11,7 @@
 
 ```
 ├── ros_packages/                 要放进 catkin_ws/src 的 ROS 包
+│   ├── wpb_service_robot/        总任务包（新）：多主人注册 + 逐个找人 + 识别动作
 │   ├── wpb_task1_owner_search/   主任务包（改动最大：任务状态机、动作识别、语音）
 │   ├── offline_voice_bridge/     离线语音（Piper 中文 TTS + SenseVoice ASR）
 │   ├── perception_msgs/          自定义消息（Detection2D / Detection2DArray）

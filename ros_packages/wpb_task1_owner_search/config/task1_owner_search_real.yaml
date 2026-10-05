@@ -45,21 +45,36 @@ clear_costmaps_timeout: 5.0
 # Owner verification. InsightFace runs on CPU so YOLO-World can keep cuda:0.
 face_verify_enabled: true
 face_verify_required: true
+# 调试开关：true 时"只要是个人"就当作主人接受，不依赖人脸库。
+# 用途：单独测试接近 / 交互等后续环节。正式比赛必须保持 false。
 allow_unverified_owner: false
 owner_enrollment_enabled: false
-owner_enrollment_name_timeout: 15.0
-owner_enrollment_confirm_timeout: 8.0
+# ASR 是“按窗口切片”识别的（window_seconds，默认 2~4 秒），一段话说完
+# 还要再等一个窗口才会变成文字发出来。所以这里的等待时间必须比
+# “人说话的时间”长一个窗口，否则用户刚报完名字就超时了。
+owner_enrollment_name_timeout: 25.0
+owner_enrollment_confirm_timeout: 20.0
 owner_enrollment_capture_seconds: 5.0
 owner_enrollment_sample_interval: 0.35
 owner_enrollment_min_samples: 6
-owner_enrollment_min_face_size: 70
+# 注册时要求的最小脸宽（像素）。上游是 70，实测偏严：
+# 人站到 2 米外时脸只有 20-30px，会被这里挡掉导致注册失败。
+# 降到 50 后，配合“整图检不到就按人体框裁剪再检”的兜底，
+# 大约 1.5 米以内都能正常注册。
+owner_enrollment_min_face_size: 50
 owner_enrollment_retries: 3
 owner_enrollment_asr_settle_seconds: 0.8
+# 文本级回声过滤：收到的 ASR 文本与最近 15 秒内机器人说过的提示语，
+# 只要最长公共子串 >= 4 个字就判定为自己的回声并丢弃。
+# 实测不丢的话，注册时“请在我前方说出您的名字”会被当成用户报的名字。
+asr_echo_guard_seconds: 15.0
+asr_echo_min_lcs: 4
 face_auto_download: false
 face_model_name: buffalo_sc
 face_model_root: /home/dyp/.insightface
 face_ctx_id: -1
-face_det_size: 480
+# 检测分辨率。480 -> 640 后小脸检出率更高（代价是每次检测稍慢）。
+face_det_size: 640
 face_det_thresh: 0.35
 face_accept_threshold: 0.45
 face_reject_threshold: 0.25
@@ -116,7 +131,7 @@ center_owner_lost_turn_speed: 0.10
 # already-fallen action recognition, with the existing point-cloud support
 # analysis retained.
 action_recognition_enabled: true
-action_core_path: /home/dyp/catkin_ws/src/offline_voice_bridge/scripts/qwen_action_recognition_node.py
+action_core_path: /home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py
 action_llm_url: http://127.0.0.1:11434/api/chat
 # 上游写的是 qwen3.5:0.8b，但那是个**纯文本模型，不支持图片输入**
 # （manifest 只有一个模型层、没有 vision projector，ollama show 也只列出
@@ -137,12 +152,15 @@ action_llm_num_gpu: 0
 # 上游写的是 /home/ubuntu20/catkin_ws/src/wpr_task1_owner_search/...，
 # 那个目录在本机不存在。这里指向本机实际存放的姿势模型。
 action_model_path: /home/dyp/models/yolo11n-pose.pt
-action_device: cpu
+# 动作识别已确定只用 YOLO-Pose，让姿态模型跑 GPU（YOLO-World 与它错峰，
+# 不调 Qwen 后显存也宽裕）。若 CUDA 不可用，节点会自动回退 CPU 并告警。
+action_device: cuda:0
 action_require_gpu: false
 action_imgsz: 416
 action_conf: 0.25
 action_iou: 0.45
-action_half: false
+# GPU 上用 FP16 推理，进一步提速（仅 cuda 生效，CPU 自动忽略）
+action_half: true
 action_sample_seconds: 5.0
 action_sample_rate: 3.0
 action_frame_count: 9
@@ -152,11 +170,20 @@ action_image_max_width: 320
 action_warmup_retries: 3
 action_warmup_retry_delay: 2.0
 action_warmup_wait_timeout: 30.0
+# 只用 YOLO-Pose + 点云高度做动作识别，不调用 Qwen 视觉模型（省 CPU/内存，
+# 也不再需要 Ollama 常驻）。置 false 可回退到 Qwen 融合方案。
+action_pose_only: true
 action_pose_enabled: true
 action_pointcloud_enabled: true
+# 相机离地高度（米）。这个值直接决定“距地高度”是否算得准：
+# 人躺在地上时“支撑面高度”读数应接近 0，否则用 实测读数 反推修正本值。
 action_pointcloud_camera_height: 0.85
+# 地面带：低于此高度视为地面
 action_pointcloud_ground_height_limit: 0.35
-action_pointcloud_furniture_height_limit: 0.42
+# 家具高度阈值：按《最新赛事规则》家具尺寸设定——
+# 方凳(当椅子用) 0.4m 是最低的“躺/坐”支撑面，沙发 0.5m，床高度不限。
+# 取 0.40m，使躺/坐在任何一件家具上都高于阈值，被判为家具面而非地面。
+action_pointcloud_furniture_height_limit: 0.40
 action_pointcloud_max_age: 1.0
 action_pointcloud_stride: 8
 action_pointcloud_min_samples: 30
@@ -167,6 +194,13 @@ action_pointcloud_surface_band: 0.25
 action_pointcloud_local_ground_padding: 0.85
 action_pointcloud_elevated_delta: 0.24
 action_pointcloud_frame_mode: auto
+# 相机离地高度自动标定：拆装机器人后相机会变高变低，开机时用点云现场
+# 实测一次（取画面底部地面点的 y 中位数），下面的 action_pointcloud_camera_height
+# 只在标定失败时作为兜底值使用。
+auto_action_camera_height: true
+action_camera_height_timeout: 8.0
+action_camera_height_min: 0.30
+action_camera_height_max: 1.80
 action_min_keypoint_conf: 0.25
 action_max_det: 4
 action_pause_yolo: true
@@ -424,3 +458,9 @@ say_wait_timeout: 5.0
 say_repeat_count: 1
 say_repeat_interval: 0.25
 say_after_publish_delay: 1.0
+# 语音回声抑制：say() 只把文本发到 /voice/say 就返回，TTS 是异步播放的。
+# 若此时立刻开始听麦克风，会把机器人自己的提示语转成文字，
+# 实测出现过“您说的是账3，请确认”被当成用户确认。
+# 这里按文本长度估算播放时长（中文约 5 字/秒），在该时间窗内丢弃 ASR 结果。
+tts_speech_chars_per_second: 5.0
+tts_squelch_pad_seconds: 0.8

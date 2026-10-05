@@ -1,0 +1,189 @@
+<launch>
+  <!--
+    ============================================================
+     独立动作识别节点（原 VS Code 调试配置“②”的正式封装）
+    ============================================================
+
+     只用 YOLO-Pose 姿态 + 点云高度做动作识别：
+       sitting / lying / waving / sudden_fall / fallen
+     不调用 Qwen / Ollama，不额外占用 CPU 与内存；姿态模型默认跑 GPU。
+
+     ── 单独验证（机器人栈需已启动：robot.sh stack）──
+       roslaunch wpb_service_robot qwen_action_recognition.launch
+       roslaunch wpb_service_robot qwen_action_recognition.launch \
+         auto_repeat_seconds:=5.0 overlay_hold_seconds:=5.0
+
+     ── 融合进主任务 ──
+       下面的参数契约与 wpb_service_robot/scripts/owner_voice_reid_test.py
+       动态拉起本节点时传的参数完全一致（它默认就指向本文件），改动参数名会
+       导致现场注册流程静默丢失配置，请保持兼容。
+
+     结果发布在 result_topic（std_msgs/String，JSON），字段包含：
+       action / place / speech / pose_action / pose_confidence / pose_reason /
+       ground_relation（含支撑面高度 surface_height_median）/ ground_fallen /
+       elevated_lying / frame_count / total_sec
+  -->
+
+  <!-- ===== 兼容调用方（owner_voice_reid_test.py）的开关 =====
+       start_camera / start_sound_play：为保持参数契约而保留。本节点依赖的
+         Kinect 图像与点云由机器人栈提供（robot.sh stack），这里不重复启动；
+         启动本文件前请确认栈已在跑，否则会等到 camera_wait_timeout 后超时。
+       start_voice：置 true 时顺带拉起本包的 TTS 节点（/voice/say），
+         让识别结果能被念出来；栈里已有 TTS 时保持 false 以免重复。 -->
+  <arg name="start_camera" default="false" />
+  <arg name="start_voice" default="false" />
+  <arg name="start_sound_play" default="false" />
+
+  <!-- ===== 节点与话题 ===== -->
+  <arg name="node_name" default="pose_action_recognition" />
+  <arg name="image_topic" default="/kinect2/qhd/image_color_rect" />
+  <arg name="points_topic" default="/kinect2/qhd/points" />
+  <arg name="say_topic" default="/voice/say" />
+  <arg name="result_topic" default="/pose_action_recognition/result" />
+  <!-- 外部触发一次识别（std_msgs/String）。payload 可为 "x1,y1,x2,y2"
+       或 {"request_id":"...","roi":"x1,y1,x2,y2"}；结果里会带回 request_id -->
+  <arg name="trigger_topic" default="/pose_action_recognition/trigger" />
+  <arg name="window_name" default="主人动作识别" />
+
+  <!-- ===== 运行模式 ===== -->
+  <arg name="show_window" default="true" />
+  <arg name="auto_analyze" default="true" />
+  <!-- 0 = 只在启动时识别一次，之后按空格触发；>0 = 每轮结束后隔这么久自动再识别 -->
+  <arg name="auto_repeat_seconds" default="0.0" />
+  <!-- 识别完成后的结果画面保持秒数（0 = 总是显示实时画面） -->
+  <arg name="overlay_hold_seconds" default="5.0" />
+  <arg name="startup_speech" default="正在识别，请稍候。" />
+  <arg name="startup_settle_seconds" default="0.0" />
+  <arg name="camera_wait_timeout" default="90.0" />
+  <arg name="say_wait_timeout" default="5.0" />
+  <!-- 是否播报识别结果；被外部触发时默认不抢话，由调用方决定说什么 -->
+  <arg name="speak_enabled" default="true" />
+  <arg name="speak_on_trigger" default="false" />
+
+  <!-- ===== 抓帧 ===== -->
+  <arg name="capture_delay" default="0.3" />
+  <arg name="capture_duration" default="5.0" />
+  <arg name="capture_frame_count" default="9" />
+
+  <!-- ===== YOLO-Pose ===== -->
+  <arg name="pose_enabled" default="true" />
+  <arg name="pose_model_path" default="$(env HOME)/models/yolo11n-pose.pt" />
+  <!-- cuda:0 优先；CUDA 不可用时节点会自动回退 CPU 并告警 -->
+  <arg name="pose_device" default="cuda:0" />
+  <arg name="pose_half" default="true" />
+  <arg name="pose_image_size" default="416" />
+  <arg name="pose_confidence" default="0.25" />
+  <arg name="pose_iou" default="0.45" />
+  <arg name="pose_max_detections" default="4" />
+  <arg name="model_warmup_retries" default="3" />
+  <arg name="model_warmup_retry_delay" default="2.0" />
+
+  <!-- ===== 点云支撑面高度分析 ===== -->
+  <arg name="pointcloud_enabled" default="true" />
+  <!-- 相机离地高度：决定“距地高度”换算是否准确。
+       人躺在地上时预览里的支撑面读数应接近 0，否则按实测值反推修正。 -->
+  <arg name="pointcloud_camera_height" default="0.85" />
+  <!-- 开机自动标定相机离地高度（拆装机器人后高度会变）。
+       标定时机器人前方底部要能看到地面，否则退回上面的固定值。 -->
+  <arg name="auto_camera_height" default="true" />
+  <arg name="camera_height_calibration_timeout" default="8.0" />
+  <arg name="camera_height_calibration_samples" default="5" />
+  <arg name="camera_height_min" default="0.30" />
+  <arg name="camera_height_max" default="1.80" />
+  <arg name="pointcloud_ground_height_limit" default="0.35" />
+  <!-- 家具高度阈值：按《最新赛事规则》，方凳(0.4m)是最低的“躺/坐”支撑面，
+       沙发 0.5m，床高度不限，因此取 0.40。 -->
+  <arg name="pointcloud_furniture_height_limit" default="0.40" />
+  <arg name="pointcloud_max_age" default="1.0" />
+  <arg name="pointcloud_stride" default="8" />
+  <arg name="pointcloud_min_samples" default="30" />
+  <arg name="pointcloud_roi_padding" default="0.20" />
+  <arg name="pointcloud_depth_percentile" default="20.0" />
+  <arg name="pointcloud_surface_band" default="0.25" />
+  <arg name="pointcloud_frame_mode" default="auto" />
+  <arg name="pointcloud_anchor_radius" default="14.0" />
+  <arg name="pointcloud_local_ground_padding" default="0.85" />
+  <arg name="pointcloud_elevated_delta" default="0.24" />
+
+  <!-- ===== 主人 ROI（主人锁定后只看指定区域，减少误检）===== -->
+  <arg name="use_owner_roi" default="false" />
+  <arg name="owner_roi" default="" />
+  <arg name="roi_padding" default="0.55" />
+
+  <!-- ===== 兼容参数：纯姿态模式下不再使用，保留以免调用方传参被静默丢弃 ===== -->
+  <arg name="llm_frame_count" default="3" />
+  <arg name="llm_url" default="http://127.0.0.1:11434/api/chat" />
+  <arg name="llm_model" default="qwen3-vl:2b-instruct" />
+  <!-- llm_timeout 仍被节点用作 camera_wait_timeout 的兼容回退值 -->
+  <arg name="llm_timeout" default="90.0" />
+  <arg name="llm_keep_alive" default="30m" />
+  <arg name="llm_max_tokens" default="20" />
+  <arg name="llm_num_ctx" default="4096" />
+  <arg name="jpeg_quality" default="65" />
+  <arg name="image_max_width" default="320" />
+
+  <!-- ===== 可选的语音/TTS 自启动（默认关闭，机器人栈已起时不要重复）===== -->
+  <include if="$(arg start_voice)"
+           file="$(find offline_voice_bridge)/launch/offline_voice_zh.launch" />
+
+  <node pkg="wpb_service_robot" type="qwen_action_recognition_node.py"
+        name="$(arg node_name)" output="screen" respawn="false">
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="points_topic" value="$(arg points_topic)" />
+    <param name="say_topic" value="$(arg say_topic)" />
+    <param name="result_topic" value="$(arg result_topic)" />
+    <param name="trigger_topic" value="$(arg trigger_topic)" />
+    <param name="window_name" value="$(arg window_name)" />
+    <param name="speak_enabled" value="$(arg speak_enabled)" />
+    <param name="speak_on_trigger" value="$(arg speak_on_trigger)" />
+
+    <param name="show_window" value="$(arg show_window)" />
+    <param name="auto_analyze" value="$(arg auto_analyze)" />
+    <param name="auto_repeat_seconds" value="$(arg auto_repeat_seconds)" />
+    <param name="overlay_hold_seconds" value="$(arg overlay_hold_seconds)" />
+    <param name="startup_speech" value="$(arg startup_speech)" />
+    <param name="startup_settle_seconds" value="$(arg startup_settle_seconds)" />
+    <param name="camera_wait_timeout" value="$(arg camera_wait_timeout)" />
+    <param name="llm_timeout" value="$(arg llm_timeout)" />
+    <param name="say_wait_timeout" value="$(arg say_wait_timeout)" />
+
+    <param name="capture_delay" value="$(arg capture_delay)" />
+    <param name="capture_duration" value="$(arg capture_duration)" />
+    <param name="capture_frame_count" value="$(arg capture_frame_count)" />
+
+    <param name="pose_enabled" value="$(arg pose_enabled)" />
+    <param name="pose_model_path" value="$(arg pose_model_path)" />
+    <param name="pose_device" value="$(arg pose_device)" />
+    <param name="pose_half" value="$(arg pose_half)" />
+    <param name="pose_image_size" value="$(arg pose_image_size)" />
+    <param name="pose_confidence" value="$(arg pose_confidence)" />
+    <param name="pose_iou" value="$(arg pose_iou)" />
+    <param name="pose_max_detections" value="$(arg pose_max_detections)" />
+    <param name="model_warmup_retries" value="$(arg model_warmup_retries)" />
+    <param name="model_warmup_retry_delay" value="$(arg model_warmup_retry_delay)" />
+
+    <param name="pointcloud_enabled" value="$(arg pointcloud_enabled)" />
+    <param name="pointcloud_camera_height" value="$(arg pointcloud_camera_height)" />
+    <param name="auto_camera_height" value="$(arg auto_camera_height)" />
+    <param name="camera_height_calibration_timeout" value="$(arg camera_height_calibration_timeout)" />
+    <param name="camera_height_calibration_samples" value="$(arg camera_height_calibration_samples)" />
+    <param name="camera_height_min" value="$(arg camera_height_min)" />
+    <param name="camera_height_max" value="$(arg camera_height_max)" />
+    <param name="pointcloud_ground_height_limit" value="$(arg pointcloud_ground_height_limit)" />
+    <param name="pointcloud_furniture_height_limit" value="$(arg pointcloud_furniture_height_limit)" />
+    <param name="pointcloud_max_age" value="$(arg pointcloud_max_age)" />
+    <param name="pointcloud_stride" value="$(arg pointcloud_stride)" />
+    <param name="pointcloud_min_samples" value="$(arg pointcloud_min_samples)" />
+    <param name="pointcloud_roi_padding" value="$(arg pointcloud_roi_padding)" />
+    <param name="pointcloud_depth_percentile" value="$(arg pointcloud_depth_percentile)" />
+    <param name="pointcloud_surface_band" value="$(arg pointcloud_surface_band)" />
+    <param name="pointcloud_frame_mode" value="$(arg pointcloud_frame_mode)" />
+    <param name="pointcloud_anchor_radius" value="$(arg pointcloud_anchor_radius)" />
+    <param name="pointcloud_local_ground_padding" value="$(arg pointcloud_local_ground_padding)" />
+    <param name="pointcloud_elevated_delta" value="$(arg pointcloud_elevated_delta)" />
+
+    <param name="use_owner_roi" value="$(arg use_owner_roi)" />
+    <param name="owner_roi" value="$(arg owner_roi)" />
+    <param name="roi_padding" value="$(arg roi_padding)" />
+  </node>
+</launch>
