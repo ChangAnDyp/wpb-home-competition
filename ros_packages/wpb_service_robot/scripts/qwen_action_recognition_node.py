@@ -334,6 +334,13 @@ def final_posture_is_horizontal(features):
     return (lying / float(len(last))) >= 0.30
 
 
+# 「躺在家具上」的自证门槛（2026-10-11 现场标定；要调就调这两个数）：
+#   MAX_OFFSET：人体支撑面读数与周围基准面最多差多少米，超过就认为这一帧自相矛盾；
+#   MIN_MARGIN：人体最低点(p20)允许比周围基准面低多少米，低于它就说明那圈不是他的支撑面。
+FURNITURE_SELF_PROOF_MAX_OFFSET = 0.35
+FURNITURE_SELF_PROOF_MIN_MARGIN = 0.25
+
+
 def relation_is_elevated(ground_relation):
     """判断支撑面是否高于地面（床/沙发/椅等家具面）。
 
@@ -342,14 +349,39 @@ def relation_is_elevated(ground_relation):
       2) 支撑面绝对高度中位数 >= 家具高度阈值（默认 0.42m）
       3) 相对本地地面的抬升量 >= 0.24m（兜底，本地地面不可靠时仅供参考）
 
+    ⚠️ 2026-10-11「自证」闸门（配合方案 A）：
+      点云自己说 elevated 不算数，还要满足两条自证：
+        ① |支撑面中位数 − 周围基准面| ≤ FURNITURE_SELF_PROOF_MAX_OFFSET(0.35m)
+           —— 人得**贴在**那个支撑面上，而不是"身体读数 1.13m、周围圈 0.64m"这种
+           互相矛盾的一帧；
+        ② 人体最低点 p20 ≥ 周围基准面 − 0.25m
+           —— 人的最低点不能明显低于那个"基准面"，否则说明那圈根本不是他的支撑面
+           （例如人躺在地上、旁边一张床把 local 拉高）。
+      不满足就返回 False，交给 merge_pose_action_result 走「没有家具证据 → 摔倒」。
+
     高度单位是“距地高度（米）”，由 PointCloudGroundAnalyzer 用相机安装高度
     换算得到，所以 pointcloud_camera_height 必须接近真实相机离地高度。
     """
     if not ground_relation:
         return False
+    median = ground_relation.get("surface_height_median")
+    p20 = ground_relation.get("surface_height_p20")
+    local = ground_relation.get("local_floor_height_p15")
+    try:
+        max_offset = float(
+            ground_relation.get("furniture_self_proof_max_offset")
+            or FURNITURE_SELF_PROOF_MAX_OFFSET
+        )
+    except (TypeError, ValueError):
+        max_offset = FURNITURE_SELF_PROOF_MAX_OFFSET
+    if median is not None and local is not None:
+        if abs(float(median) - float(local)) > max_offset:
+            return False
+    if p20 is not None and local is not None:
+        if float(p20) < float(local) - FURNITURE_SELF_PROOF_MIN_MARGIN:
+            return False
     if ground_relation.get("status") == "elevated":
         return True
-    median = ground_relation.get("surface_height_median")
     limit = ground_relation.get("furniture_height_limit")
     if median is not None and limit is not None:
         return float(median) >= float(limit)
@@ -390,8 +422,24 @@ def merge_pose_action_result(pose_action, ground_relation, final_pose_is_horizon
         return "lying", PLACE_UNKNOWN, ground_fallen, elevated_lying
     if pose_action == "waving":
         return "waving", PLACE_UNKNOWN, ground_fallen, elevated_lying
-    if pose_action in ("sitting", "lying"):
-        return pose_action, PLACE_UNKNOWN, ground_fallen, elevated_lying
+    # ---- 方案 A（2026-10-11 现场决定，用户明确选择）------------------------------
+    # 人已经横躺、而点云拿不出可信的"家具支撑面"证据时，一律按**摔倒**处理。
+    # 理由：赛题要的是"主人摔倒必须去扶"，把地上的摔倒漏成"躺着"代价最大；
+    #       而"躺在家具上"这一路已经在上面两条（elevated_lying / elevated_surface）
+    #       被拦截，能走到这里说明点云没给出可信的家具面。
+    # 「可信」由 relation_is_elevated 的自证闸门把关（上面那两条也因此受益）。
+    if pose_action == "lying":
+        rospy.loginfo(
+            "横躺 + 点云无（可信）家具证据 -> 按摔倒处理（方案A）："
+            "status=%s median=%s p20=%s local=%s",
+            ground_relation.get("status", "unknown"),
+            ground_relation.get("surface_height_median"),
+            ground_relation.get("surface_height_p20"),
+            ground_relation.get("local_floor_height_p15"),
+        )
+        return "fallen", "floor", ground_fallen, elevated_lying
+    if pose_action == "sitting":
+        return "sitting", PLACE_UNKNOWN, ground_fallen, elevated_lying
     if pose_action == "fallen":
         return "fallen", "floor", ground_fallen, elevated_lying
     return ACTION_UNKNOWN, PLACE_UNKNOWN, ground_fallen, elevated_lying
@@ -512,6 +560,7 @@ class PoseActionAnalyzer:
         iou,
         max_detections,
         half=False,
+        sitting_knee_reference="torso",
     ):
         self.model_path = model_path
         self.device = device
@@ -520,6 +569,14 @@ class PoseActionAnalyzer:
         self.confidence = confidence
         self.iou = iou
         self.max_detections = max_detections
+        # 坐姿判据"膝盖离髋很近"用什么当尺度基准：
+        #   torso（默认）= 肩—髋那一段的长度；box = 整个人体框的高度（旧行为）
+        # 为什么改：框高会被两件事带偏 —— 抬手（挥手的框被手臂撑高）和腿出画
+        # （低头相机下人一近腿就被裁在画面外，框变矮）。2026-10 现场实测：
+        # 站着挥手被判成 sitting(0.85)，就是"框被手臂撑高 + 膝盖相对框高看着很近"
+        # 一起造成的。躯干长度不受这两件事影响，站姿下"髋到膝"约等于 0.85 倍
+        # 躯干长，坐姿下几乎为 0 —— 用 0.45 倍躯干长当阈值能把两者分开。
+        self.sitting_knee_reference = str(sitting_knee_reference or "torso").lower()
         self.model = None
         self.ready = False
 
@@ -697,10 +754,18 @@ class PoseActionAnalyzer:
 
         bent_knee = knee_angle is not None and knee_angle < 150.0
         knees_near_hips = False
+        knee_hip_ratio = None
         if hip_mid is not None:
             knee_mid = self._midpoint(left_knee, right_knee)
             if knee_mid is not None:
-                knees_near_hips = abs(knee_mid[1] - hip_mid[1]) < box_height * 0.45
+                reference = box_height
+                if not self.sitting_knee_reference.startswith("box") and shoulder_mid is not None:
+                    reference = math.hypot(
+                        hip_mid[0] - shoulder_mid[0], hip_mid[1] - shoulder_mid[1]
+                    )
+                if reference is not None and float(reference) > 1e-6:
+                    knee_hip_ratio = abs(knee_mid[1] - hip_mid[1]) / float(reference)
+                    knees_near_hips = knee_hip_ratio < 0.45
         sitting_like = (
             not lying_like
             and torso_verticality > 0.42
@@ -742,6 +807,11 @@ class PoseActionAnalyzer:
             "lying_like": lying_like,
             "upright_like": upright_like,
             "sitting_like": sitting_like,
+            # 诊断用：坐姿判据的两个依据到底成不成立（日志里打出来，别再靠猜）
+            "bent_knee": bent_knee,
+            "knee_angle": knee_angle,
+            "knee_hip_ratio": knee_hip_ratio,
+            "box_height_px": box_height,
             "left_wrist_above": left_above,
             "right_wrist_above": right_above,
             "left_wrist_x": left_wrist_x,
@@ -925,6 +995,7 @@ class PoseActionAnalyzer:
             return "sudden_fall", confidence, "pose fall transition"
 
         wave_scores = []
+        wave_diagnostics = []
         for side in ("left", "right"):
             above_key = "%s_wrist_above" % side
             x_key = "%s_wrist_x" % side
@@ -937,6 +1008,9 @@ class PoseActionAnalyzer:
                 and value[y_key] is not None
             ]
             if len(raised_points) < 3:
+                wave_diagnostics.append(
+                    "%s抬手帧只有 %d 帧（需≥3）" % (side, len(raised_points))
+                )
                 continue
             raised_x = [point[0] for point in raised_points]
             raised_y = [point[1] for point in raised_points]
@@ -947,6 +1021,16 @@ class PoseActionAnalyzer:
             total_path = x_path + y_path
             direction_changes = x_direction_changes + y_direction_changes
             has_reversal = direction_changes >= 1 or total_path >= motion_range * 1.35
+            wave_diagnostics.append(
+                "%s抬手帧占比 %.2f/0.30 幅度 %.3f/0.035 路径 %.3f/0.060 换向 %d"
+                % (
+                    side,
+                    raised_ratio,
+                    motion_range,
+                    total_path,
+                    direction_changes,
+                )
+            )
             if (
                 raised_ratio >= 0.30
                 and motion_range >= 0.035
@@ -961,7 +1045,17 @@ class PoseActionAnalyzer:
                 )
                 wave_scores.append(score)
         if wave_scores:
+            rospy.loginfo(
+                "挥手判定成立（score=%.2f）：%s",
+                max(wave_scores),
+                "；".join(wave_diagnostics),
+            )
             return "waving", max(wave_scores), "raised wrist motion"
+
+        # 挥手没成立时，把"差在哪一条"打出来。
+        # 没有这一行，现场只能说"我明明挥手了它没认出来"，没法判断是抬手帧太少
+        # （手举太高出画了）还是幅度不够（挥得太小）。
+        rospy.loginfo("挥手判据未过 -> %s", "；".join(wave_diagnostics) or "无数据")
 
         if last_lie_ratio >= 0.40:
             return (
@@ -970,6 +1064,26 @@ class PoseActionAnalyzer:
                 "horizontal pose",
             )
         if last_sitting_ratio >= 0.40:
+            rospy.loginfo(
+                "坐姿判定依据：最后 1/4 帧 sitting_like 占比 %.2f；"
+                "屈膝帧占比 %.2f；膝-髋/躯干 比值中位 %s（<0.45 才算膝靠近髋）；"
+                "躯干竖直度中位 %.2f",
+                last_sitting_ratio,
+                sum(1 for value in last if value.get("bent_knee")) / float(len(last)),
+                (
+                    "%.2f"
+                    % median(
+                        [
+                            value["knee_hip_ratio"]
+                            for value in last
+                            if value.get("knee_hip_ratio") is not None
+                        ]
+                    )
+                    if any(value.get("knee_hip_ratio") is not None for value in last)
+                    else "量不到（膝盖或髋没检出来）"
+                ),
+                last_torso,
+            )
             return (
                 "sitting",
                 min(0.90, 0.50 + 0.35 * last_sitting_ratio),
@@ -1481,6 +1595,7 @@ class PoseActionRecognitionNode:
             float(rospy.get_param("~pose_iou", 0.45)),
             max(1, int(rospy.get_param("~pose_max_detections", 4))),
             bool(rospy.get_param("~pose_half", False)),
+            str(rospy.get_param("~sitting_knee_reference", "torso")),
         )
         self.pointcloud_enabled = bool(rospy.get_param("~pointcloud_enabled", True))
         self.pointcloud_analyzer = PointCloudGroundAnalyzer(

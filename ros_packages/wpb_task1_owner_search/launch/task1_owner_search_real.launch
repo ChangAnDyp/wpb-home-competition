@@ -35,6 +35,7 @@
   <arg name="start_base" default="true" />
   <arg name="start_lidar" default="true" />
   <arg name="start_kinect" default="true" />
+  <arg name="kinect_start_qhd_points" default="true" />
   <arg name="start_map_server" default="true" />
   <arg name="start_amcl" default="true" />
   <!-- 本机没有 jie_ware，默认走 AMCL。详见 wpb_real_navigation.launch 的说明。 -->
@@ -100,6 +101,7 @@
       <arg name="start_base" value="$(arg start_base)" />
       <arg name="start_lidar" value="$(arg start_lidar)" />
       <arg name="start_kinect" value="$(arg start_kinect)" />
+      <arg name="kinect_start_qhd_points" value="$(arg kinect_start_qhd_points)" />
       <arg name="start_map_server" value="$(arg start_map_server)" />
       <arg name="start_amcl" value="$(arg start_amcl)" />
       <arg name="use_jie_lidar_loc" value="$(arg use_jie_lidar_loc)" />

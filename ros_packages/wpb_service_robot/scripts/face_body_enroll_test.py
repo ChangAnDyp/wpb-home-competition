@@ -111,6 +111,11 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
             0.0,
             min(1.0, float(rospy.get_param("~sitting_appearance_threshold", 0.75))),
         )
+        # 人脸框小于这个像素数时，不采信它的相似度（详见 result_is_match 里
+        # sitting 分支的说明）。0 = 关闭（默认，保持原来的严格行为）。
+        self.sitting_ignore_small_face_px = max(
+            0.0, float(rospy.get_param("~sitting_ignore_small_face_px", 0.0))
+        )
         # "人体框明确横躺"的判定线：宽 / 高 ≥ 这个值就当横躺。
         # 用来纠正姿态判决 sitting/lying 抖动（站着的人框是竖的，坐着大概方）。
         self.strong_lying_aspect = max(
@@ -705,7 +710,11 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
         if not self.pose_first_detection:
             return super().wait_for_camera_inputs()
         started = time.time()
-        deadline = started + self.startup_timeout
+        # 起栈后第一帧可能要等一会儿：bridge 打开设备 + 看门狗可能正在做恢复
+        # （重载 nodelet / 重启 nodelet manager / USB 软拔插）。默认给 90 秒，
+        # 否则会出现"看门狗正在救，任务却在第 35 秒自杀"的尴尬。
+        limit = float(getattr(self, "camera_startup_timeout", self.startup_timeout))
+        deadline = started + limit
         last_report = 0.0
         rate = rospy.Rate(10)
         while not rospy.is_shutdown() and time.time() < deadline:
@@ -714,21 +723,24 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
             if has_image:
                 self.publish_status("camera_ready")
                 return True
-            # 每 5 秒提示一次，避免"静默等 35 秒然后报错"，看不出卡在哪
+            # 每 5 秒提示一次，避免"静默等到超时然后报错"，看不出卡在哪
             if time.time() - last_report >= 5.0:
                 last_report = time.time()
                 rospy.logwarn(
-                    "等待相机图像：%s（已等 %.0f 秒 / %.0f 秒）",
+                    "等待相机图像：%s（已等 %.0f 秒 / %.0f 秒）；"
+                    "看门狗自愈顺序：重载 bridge nodelet → 重启 nodelet manager → "
+                    "USB 软拔插（每级约 20~30 秒，别急着 Ctrl-C）",
                     self.image_topic,
                     time.time() - started,
-                    self.startup_timeout,
+                    limit,
                 )
             rate.sleep()
         raise RuntimeError(
             "相机没有出图：%s（已等 %.0f 秒）。请依次检查："
             "① 机器人栈是否在跑（robot.sh status）；"
             "② rostopic hz %s 有没有数据；"
-            "③ 是否有残留进程占着 Kinect（先跑 robot.sh stop 再起栈）"
+            "③ 是否有残留进程占着 Kinect（先跑 robot.sh stop 再起栈）；"
+            "④ 直接跑 tools/camera_health.sh 看结论（可加 --recover 一键恢复）"
             % (self.image_topic, time.time() - started, self.image_topic)
         )
 
@@ -964,6 +976,16 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
                     "priority": float(score) * area_ratio,
                     "height_ratio": (y2 - y1) / float(height),
                     "pose_label": pose_label_for(index, box, score),
+                    # 关键点也一起带出去：摔倒靠近要用"左右肩+左右髋"的中点当躯干锚点，
+                    # 只在这个小窗口里取点云（现场实测：整条身体带里大部分点在家具/墙面上）。
+                    "keypoints": (
+                        keypoints[index] if index < len(keypoints) else None
+                    ),
+                    "keypoint_confidences": (
+                        keypoint_confidences[index]
+                        if index < len(keypoint_confidences)
+                        else None
+                    ),
                 }
             )
         if candidates:
@@ -1079,9 +1101,38 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
             #   完全没检测到人脸  -> 才允许外观通道，但阈值要提高
             face_score = result.get("face_score")
             if face_score is not None:
+                # 人脸很小的时候，它的相似度基本是噪声（实测 2~3 米外的人脸只有
+                # 三四十像素，同一段视频里相似度在 0.09~0.44 之间乱跳），
+                # 让这种"人脸"一票否决掉一个 0.77 的身形匹配是不合理的。
+                # 但放宽它是有代价的：坐着的陌生人如果身形分够高也会被认进来
+                # （实测陌生人的身形分能到 0.9 上下），所以默认**不放宽**，
+                # 由 ~sitting_ignore_small_face_px 显式打开（填像素值，比如 55）。
+                small_face_px = float(
+                    getattr(self, "sitting_ignore_small_face_px", 0.0) or 0.0
+                )
+                face_min_side = result.get("face_min_side")
+                if (
+                    small_face_px > 0.0
+                    and face_min_side is not None
+                    and float(face_min_side) > 0.0
+                    and float(face_min_side) < small_face_px
+                ):
+                    rospy.loginfo(
+                        "人脸的框只有 %.0fpx（< %.0fpx）太不可信，不拿它当否决依据 "
+                        "-> 改走外观通道复核（阈值 %.2f）",
+                        float(face_min_side),
+                        small_face_px,
+                        self.sitting_appearance_threshold,
+                    )
+                    return self.appearance_match_with(
+                        result,
+                        tag="外观通道复核(sitting,脸太小)",
+                        threshold=self.sitting_appearance_threshold,
+                    )
                 rospy.loginfo(
-                    "拒绝：姿态=sitting 且检测到人脸（相似度 %.3f）但未通过 -> 不认",
+                    "拒绝：姿态=sitting 且检测到人脸（相似度 %.3f，框 %.0fpx）但未通过 -> 不认",
                     float(face_score),
+                    float(face_min_side or 0.0),
                 )
                 return False
             rospy.loginfo(
@@ -1276,12 +1327,17 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
             and reid_score >= self.lying_min_reid_score
         )
         rospy.loginfo(
-            "%s：score=%.3f(需≥%.2f) reid=%.3f(需≥%.2f) -> %s",
+            "%s：score=%.3f(需≥%.2f) reid=%.3f(需≥%.2f) 颜色=%s -> %s",
             tag,
             score,
             need,
             reid_score,
             self.lying_min_reid_score,
+            (
+                "%.3f" % float(result.get("color_score"))
+                if result.get("color_score") is not None
+                else "无"
+            ),
             "接受" if matched else "拒绝",
         )
         return matched
@@ -1315,9 +1371,14 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
                 return reid_score >= self.face_min_reid_score
             rospy.loginfo_throttle(
                 2.0,
-                "拒绝：检测到人脸但相似度 %.3f < %.2f（判定不是主人）",
+                "拒绝：检测到人脸但相似度 %.3f < %.2f（判定不是主人）｜"
+                "人脸区域=%s 人脸数=%s 身形分数=%.3f 外观分数=%.3f",
                 face_score,
                 self.face_accept_threshold,
+                result.get("face_region") or "?",
+                result.get("face_count"),
+                score,
+                reid_score,
             )
             return False
 

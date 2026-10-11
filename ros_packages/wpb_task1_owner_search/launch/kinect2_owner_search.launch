@@ -18,15 +18,51 @@
   <arg name="bilateral_filter" default="true" />
   <arg name="edge_aware_filter" default="true" />
   <arg name="worker_threads" default="2" />
-  <arg name="respawn" default="false" />
+  <!-- 默认允许 respawn：相机桥停发（实测"话题在、发布率 0Hz"）时，
+       下面的看门狗会 kill 掉 bridge，靠 respawn 自动重新加载 nodelet、
+       重新打开 freenect2 设备。这是现场最有效的自救手段。 -->
+  <arg name="respawn" default="true" />
   <arg name="output" default="screen" />
   <arg name="start_qhd_points" default="true" />
 
-  <node pkg="nodelet" type="nodelet" name="$(arg base_name)" args="manager" output="screen" />
+  <!-- ===== 彩色流看门狗 =====
+       现场最常见的故障不是相机节点崩掉，而是它还在运行、话题还在，
+       但发布率掉到 0 Hz（最后一帧永远留在缓存里）。看门狗发现超时后
+       kill 掉 bridge 的 nodelet 加载进程，配合上面的 respawn 重新打开设备；
+       重载救不回来时再对 USB 设备做一次软件拔插（045e:02c4 = Kinect v2）。
+       实现在 wpb_service_robot 包里，起栈时由这里拉起。 -->
+  <arg name="start_stream_watchdog" default="true" />
+  <arg name="stream_stall_seconds" default="6.0" />
+  <arg name="stream_watchdog_warmup_seconds" default="20.0" />
+  <arg name="stream_watchdog_restart_enabled" default="$(arg respawn)" />
+  <arg name="stream_watchdog_max_restarts" default="4" />
+  <arg name="stream_watchdog_restart_cooldown" default="25.0" />
+  <arg name="stream_watchdog_usb_reset" default="true" />
+  <arg name="stream_watchdog_usb_reset_after_restarts" default="1" />
+  <arg name="stream_watchdog_max_usb_resets" default="3" />
+  <!-- 深度保活订阅（默认关）。
+       打开后看门狗会额外订阅 /kinect2/sd/camera_info，把 bridge 的"有订阅者"
+       集合钉死（避免厂商 bridge 的 callbackStatus 在订阅者变化时
+       device->stop() + startStreams()）。但它的副作用是**强制打开深度流**：
+       2026-10-09 实测这台机器上深度流一帧都不出（bridge 日志一直是
+       `depth processing: ~0Hz`），白白多占 USB 带宽和 CPU。做深度稳定性 A/B
+       时可以传 `/kinect2/sd/camera_info` 打开。 -->
+  <arg name="stream_watchdog_keepalive_depth" default="" />
+
+  <!-- nodelet manager：真正持有相机设备句柄的进程。
+
+       为什么必须 respawn="true"：看门狗最难救的故障形态就是"manager 卡死"
+       （libfreenect2 传输线程没退干净 → unload/load 全部阻塞）。老版本只
+       respawn bridge（nodelet load 进程），manager 卡住时新 load 永远执行不完，
+       画面就永远回不来 —— 看门狗唯一的路是**杀掉 manager**，靠这里重新拉起。
+       实测（2026-10-09）：kill bridge 之后日志里再没有任何
+       "Kinect2Bridge::initialize"，就是这个原因。 -->
+  <node pkg="nodelet" type="nodelet" name="$(arg base_name)" args="manager"
+        respawn="true" respawn_delay="2.0" output="screen" />
 
   <node pkg="nodelet" type="nodelet" name="$(arg base_name)_bridge"
         args="load kinect2_bridge/kinect2_bridge_nodelet $(arg base_name)"
-        respawn="$(arg respawn)" output="$(arg output)">
+        respawn="$(arg respawn)" respawn_delay="2.0" output="$(arg output)">
     <param name="base_name" type="str" value="$(arg base_name)" />
     <param name="sensor" type="str" value="$(arg sensor)" />
     <param name="publish_tf" type="bool" value="$(arg publish_tf)" />
@@ -49,11 +85,44 @@
   </node>
 
   <node if="$(arg start_qhd_points)" pkg="nodelet" type="nodelet" name="$(arg base_name)_points_xyzrgb_qhd"
-        args="load depth_image_proc/point_cloud_xyzrgb $(arg base_name)" respawn="$(arg respawn)" output="$(arg output)">
+        args="load depth_image_proc/point_cloud_xyzrgb $(arg base_name)"
+        respawn="$(arg respawn)" respawn_delay="2.0" output="$(arg output)">
     <remap from="rgb/camera_info" to="$(arg base_name)/qhd/camera_info" />
     <remap from="rgb/image_rect_color" to="$(arg base_name)/qhd/image_color_rect" />
     <remap from="depth_registered/image_rect" to="$(arg base_name)/qhd/image_depth_rect" />
     <remap from="depth_registered/points" to="$(arg base_name)/qhd/points" />
     <param name="queue_size" type="int" value="$(arg queue_size)" />
+  </node>
+
+  <!-- 彩色流看门狗：话题在但发布率掉 0Hz 时自动重启 bridge / 软件拔插 USB
+
+       respawn="true" 是必须的：看门狗是这个栈里唯一"常驻订阅彩色图"的节点，
+       它的存在有两个作用 ——
+         ① 让 bridge 的订阅者数量不会掉到 0（厂商 bridge 的 callbackStatus 会在
+            "no clients connected" 时 device->stop()，把相机设备关掉）；
+         ② 真掉流时由它重启 bridge 把画面救回来。
+       实测踩过：把任务节点杀掉重跑时，看门狗在启动 0.25 秒后收到 SIGINT 退出，
+       于是相机在"任务退出"那一刻被 bridge 停掉，再也没起来；而看门狗没了，
+       也就没人来恢复 —— 现场表现就是"第二次跑任务一直等相机图像"。
+       配了 respawn 之后它被杀/崩溃都会自动重来，重新订阅并把设备拉起来。 -->
+  <node if="$(arg start_stream_watchdog)" pkg="wpb_service_robot"
+        type="kinect2_stream_watchdog.py" name="kinect2_stream_watchdog" output="screen"
+        respawn="true" respawn_delay="2.0">
+    <param name="image_topic" value="/$(arg base_name)/qhd/image_color_rect" />
+    <param name="bridge_node_name" value="/$(arg base_name)_bridge" />
+    <param name="manager_node_name" value="/$(arg base_name)" />
+    <param name="stall_seconds" value="$(arg stream_stall_seconds)" />
+    <param name="warmup_seconds" value="$(arg stream_watchdog_warmup_seconds)" />
+    <param name="restart_enabled" value="$(arg stream_watchdog_restart_enabled)" />
+    <param name="restart_cooldown" value="$(arg stream_watchdog_restart_cooldown)" />
+    <param name="usb_reset_enabled" value="$(arg stream_watchdog_usb_reset)" />
+    <param name="usb_vendor_id" value="045e" />
+    <param name="usb_product_id" value="02c4" />
+    <!-- 便宜的深度保活订阅：钉住 bridge 的"有订阅者"集合，
+         避免 callbackStatus 触发 device->stop()/startStreams()。 -->
+    <param name="keepalive_depth_topic" value="$(arg stream_watchdog_keepalive_depth)" />
+    <!-- 带 root 的 sysfs authorized 软拔插脚本（见 tools/install_camera_usb_permission.sh）。
+         没装也不影响：看门狗会自动退化成 USBDEVFS_RESET。 -->
+    <param name="usb_power_cycle_command" value="/usr/local/sbin/kinect2-usb-powercycle" />
   </node>
 </launch>

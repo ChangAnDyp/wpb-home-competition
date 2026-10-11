@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# coding: utf-8
+"""Kinect v2 USB 软拔插（sysfs ``authorized`` 0→1）。
+
+为什么需要它：相机掉流后，纯软件能做的**最后一级**恢复是让设备在 USB 上重新
+枚举一次。``USBDEVFS_RESET``（ioctl）在现场实测经常救不回来（能复位端口，但
+设备的流传输引擎/内核 claim 状态没回到干净状态），而 ``authorized`` 0→1 会把
+设备从总线上摘掉再加回来，等效于一次"软件拔插"。
+
+``/sys/bus/usb/devices/4-2/authorized`` 是 ``0644 root:root``，普通用户写不了，
+所以这个脚本要 root（或 sudoers 里给它 NOPASSWD，由看门狗以 ``sudo -n`` 调用）。
+安装：tools/install_camera_usb_permission.sh
+
+用法:
+    sudo /usr/local/sbin/kinect2-usb-powercycle          # 默认 045e:02c4
+    sudo /usr/local/sbin/kinect2-usb-powercycle --status # 只看状态，不拔插
+"""
+
+import glob
+import os
+import sys
+import time
+
+VENDOR_ID = "045e"
+PRODUCT_ID = "02c4"
+SYSFS_ROOT = "/sys/bus/usb/devices"
+
+
+def find_device(vendor_id=VENDOR_ID, product_id=PRODUCT_ID):
+    """按 VID:PID 找 sysfs 目录名（例如 4-2）。"""
+    for path in sorted(glob.glob(os.path.join(SYSFS_ROOT, "*"))):
+        try:
+            with open(os.path.join(path, "idVendor")) as handle:
+                vendor = handle.read().strip().lower()
+            with open(os.path.join(path, "idProduct")) as handle:
+                product = handle.read().strip().lower()
+        except OSError:
+            continue
+        if (vendor, product) == (vendor_id.lower(), product_id.lower()):
+            return os.path.basename(path)
+    return None
+
+
+def read(path, default="?"):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return default
+
+
+def main(argv):
+    sysfs_name = find_device()
+    if sysfs_name is None:
+        print("找不到 %s:%s：相机不在 USB 总线上（检查 12V 电源 / USB 线）"
+              % (VENDOR_ID, PRODUCT_ID))
+        return 2
+    base = os.path.join(SYSFS_ROOT, sysfs_name)
+    print("设备: %s  serial=%s  speed=%s  authorized=%s"
+          % (sysfs_name, read(base + "/serial"), read(base + "/speed"),
+             read(base + "/authorized")))
+    if "--status" in argv:
+        return 0
+
+    authorized = os.path.join(base, "authorized")
+    if os.geteuid() != 0:
+        print("需要 root：请用 sudo 运行（或让看门狗通过 sudo -n 调用）")
+        return 3
+    try:
+        with open(authorized, "w") as handle:
+            handle.write("0")
+    except OSError as exc:
+        print("写 %s 失败：%s" % (authorized, exc))
+        return 4
+    time.sleep(1.0)
+    try:
+        with open(authorized, "w") as handle:
+            handle.write("1")
+    except OSError as exc:
+        # 这一步失败会让相机永久消失，必须显式说出来。
+        print("已经 deauthorize，但重新 authorize 失败：%s —— 请立刻人工重插 Kinect" % exc)
+        return 5
+    print("已软拔插 %s（authorized 0→1）；设备会重新枚举，接着重启 bridge 即可" % sysfs_name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

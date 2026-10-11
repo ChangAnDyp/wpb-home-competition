@@ -2,9 +2,11 @@
 # coding=utf-8
 
 import json
+import glob
 import math
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -222,6 +224,10 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             1,
             int(rospy.get_param("~action_pose_max_detections", 4)),
         )
+        # 启动动作节点前先清掉上一轮残留的动作节点进程（任务被强杀时会留下）。
+        self.action_cleanup_orphans = bool(
+            rospy.get_param("~action_cleanup_orphans", True)
+        )
         self.action_llm_timeout = max(
             1.0,
             float(rospy.get_param("~action_llm_timeout", 90.0)),
@@ -348,6 +354,9 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             "~navigation_failed_text", "导航到客厅失败。"
         )
         self.latest_yaw = None
+        self.latest_odom_x = None
+        self.latest_odom_y = None
+        self.latest_odom_stamp = 0.0
         self.cmd_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
         self.move_base = actionlib.SimpleActionClient("move_base", MoveBaseAction)
 
@@ -447,7 +456,20 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 return True
             rospy.sleep(0.1)
         self.publish_status("asr_not_ready", topic=self.asr_topic, timeout=self.asr_wait_timeout)
-        rospy.logerr("No ASR publisher connected on %s", self.asr_topic)
+        # 这一步在注册阶段是致命的（听不到主人姓名）。最常见的原因不是"节点崩了"，
+        # 而是**起栈时没开 ASR**：bringup 里 start_asr 默认 false，只有 ⑦/⑦b 显式带了
+        # start_asr:=true。所以日志里必须把"怎么修"写清楚，不然现场只能干看着。
+        rospy.logerr(
+            "No ASR publisher connected on %s（%.0f 秒内没有 /voice/asr_text 发布者）。"
+            "最常见原因：起栈时没带 start_asr:=true —— bringup 里 start_asr 默认是 false！"
+            "修法：① 用 VS Code 配置 ⑦/⑦b 重新起栈（它们显式带 start_asr:=true）；"
+            "② 或不停栈，单独把离线语音挂上来："
+            "roslaunch offline_voice_bridge offline_voice_zh.launch "
+            "start_tts:=false start_sound_play:=false start_asr:=true "
+            "asr_window_seconds:=2.5；③ 体检：bash tools/voice_health.sh",
+            self.asr_topic,
+            self.asr_wait_timeout,
+        )
         self.speak(self.asr_not_ready_text, wait=True)
         return False
 
@@ -525,6 +547,63 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 return True
         return self._launch_action_node(owner_result, auto_analyze=False)
 
+    def cleanup_orphan_action_nodes(self, reason=""):
+        """清掉上一轮遗留的动作节点进程（任务被强杀时它会活下来）。
+
+        为什么要做：动作节点是 roslaunch 拉起来的子进程，父进程被 Ctrl-C 或被 VS Code
+        强杀时它不会被回收，会一直占着 ~700MB 内存和一份模型权重。2026-10-09 实测：
+        上午 11:44 启动的动作节点到下午 17:42 还活着（近 6 小时）。而且 ROS1 里新节点
+        用同名注册会把旧的踢掉，留着只会互相干扰。
+
+        只匹配本任务专用脚本名 ``qwen_action_recognition_node``，不碰相机/导航/语音。
+        """
+        me = os.getpid()
+        known = set()
+        child = getattr(self, "action_process", None)
+        if getattr(child, "pid", None):
+            known.add(int(child.pid))
+        victims = []
+        for proc_dir in glob.glob("/proc/[0-9]*"):
+            try:
+                pid = int(os.path.basename(proc_dir))
+            except ValueError:
+                continue
+            if pid == me or pid in known:
+                continue
+            try:
+                with open(os.path.join(proc_dir, "cmdline"), "rb") as handle:
+                    cmdline = handle.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "qwen_action_recognition_node" not in cmdline:
+                continue
+            victims.append(pid)
+        if not victims:
+            return
+        rospy.logwarn(
+            "%s：清掉 %d 个遗留的动作识别进程 %s（上一轮没被回收）",
+            reason or "启动动作节点前",
+            len(victims),
+            victims,
+        )
+        for pid in victims:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if not any(os.path.exists("/proc/%d" % pid) for pid in victims):
+                return
+            time.sleep(0.2)
+        for pid in victims:
+            if os.path.exists("/proc/%d" % pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    rospy.logwarn("遗留动作节点 pid %d 不吃 SIGTERM，已 SIGKILL", pid)
+                except OSError:
+                    pass
+
     def _launch_action_node(self, owner_result=None, auto_analyze=True):
         """把动作识别节点拉起来。
 
@@ -535,6 +614,8 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         if not self.action_recognition_enabled:
             self.publish_status("owner_action_disabled")
             return False
+        if self.action_cleanup_orphans:
+            self.cleanup_orphan_action_nodes()
         if not self.action_launch_file or not os.path.exists(self.action_launch_file):
             rospy.logwarn("Qwen action launch file not found: %s", self.action_launch_file)
             self.publish_status(
@@ -877,6 +958,19 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         yaw = math.atan2(siny_cosp, cosy_cosp)
         with self.lock:
             self.latest_yaw = yaw
+            # 位置也要存：摔倒靠近的"最后一段爬行"是纯里程计闭环（点云在 <1 m
+            # 看不到躺着的人），必须知道已经走了多远。
+            self.latest_odom_x = float(message.pose.pose.position.x)
+            self.latest_odom_y = float(message.pose.pose.position.y)
+            self.latest_odom_stamp = time.time()
+
+    def get_latest_odom_xy(self):
+        """返回 (x, y, age)；没收到过里程计返回 (None, None, None)。"""
+        with self.lock:
+            if getattr(self, "latest_odom_x", None) is None:
+                return None, None, None
+            age = time.time() - float(getattr(self, "latest_odom_stamp", 0.0) or 0.0)
+            return self.latest_odom_x, self.latest_odom_y, age
 
     def init_yolo_window(self):
         if not self.show_yolo_window or self.yolo_window_failed:
@@ -1121,7 +1215,7 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
 
     def scan_for_owner_for_target(
         self, target_owner_index=None, not_found_text=None, followup=True,
-        allowed_owner_indices=None,
+        allowed_owner_indices=None, on_match=None,
     ):
         """原地旋转找主人。
 
@@ -1132,14 +1226,28 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         allowed_owner_indices：只认这个集合里的主人（"谁先出现先认谁"的模式用）。
         和 target_owner_index 二选一；两个都不传 = 任意一位都算。
 
+        on_match：**一圈扫出多人**用。传了它就不是"认到第一位就停"，而是：
+          · 每确认一位，就地调用 on_match(result)（由调用方做居中/播报/动作），
+            然后继续转，把这一圈里剩下的主人都扫出来；
+          · 已经确认过的那位从"还要认的人"里去掉，不会再被重复确认；
+          · on_match 返回真值 = 请立刻结束这一圈（例如比赛时间快到了）；
+          · 认完一圈后返回**已确认主人的列表**（一个都没认到就返回空列表）。
+          为什么值得这么做：一个房间里可能同时站着两位主人，而"认到一位就收工"
+          等于必须再转第二圈才能看到另一位 —— 那一圈就是纯浪费（实测一圈约 40 秒）。
+          一位主人被确认的那一刻，他就在画面中间，所以"就地处理"不需要再转回去找他。
+          on_match 为 None 时行为与以前完全一致。
+
         not_found_text：这一轮没找到时的播报。None = 用默认的
         ~owner_not_found_text；传空串则完全不播报（由调用方自己组织话术）。
+        注意：用了 on_match（一圈扫多人）时这句**不会**播报 —— 扫完这一圈后
+        是要接着去下一个房间、还是宣布"没找到"，得由调用方决定。
 
         followup：认到人之后要不要顺手做"居中 → 播报 → 动作识别"这一套。
         True（默认）= 老行为，③d 就靠它跑完全流程。
         False = 只把结果返回给调用方，由调用方自己决定接下来做什么。
         总任务（task_all_owners.py）必须传 False：它会自己做居中/播报/动作识别，
         否则一套动作识别会跑两遍，白等十几秒（实测踩过）。
+        （on_match 和 followup 同时给时以 on_match 为准，避免跑两套处理。）
         """
         rospy.sleep(self.scan_after_arrival_delay)
         start_yaw = self.get_latest_yaw()
@@ -1149,6 +1257,13 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         last_eval_time = 0.0
         last_match_owner_index = None
         match_consecutive_count = 0
+        # 一圈扫多人模式：pending 是"这一圈还要认的主人"，认到一位就去掉一位
+        collect_mode = on_match is not None
+        pending = (
+            set(allowed_owner_indices) if allowed_owner_indices is not None else None
+        )
+        collected = []
+        stop_requested = False
         step_duration = self.scan_step_angle / max(abs(self.scan_angular_speed), 1e-3)
         moving = True
         phase_deadline = time.time() + step_duration
@@ -1172,6 +1287,19 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             self.scan_pause,
         )
         while not rospy.is_shutdown() and time.time() < deadline:
+            # 相机断流时不要继续转圈：识别的全是空帧，白烧时间预算，而且日志
+            # 会看起来像"这间房没人"。父类只在这里调用（有定义的子类才生效），
+            # 具体策略见 task_all_owners.hold_until_camera_recovers。
+            holder = getattr(self, "hold_until_camera_recovers", None)
+            if holder is not None:
+                before_wait = time.time()
+                if not holder("扫描房间"):
+                    raise RuntimeError(
+                        "相机在扫描房间过程中持续断流，看门狗没能救回来（"
+                        "现场处理见 tools/camera_health.sh）"
+                    )
+                # 等相机的时间不算进"这一圈"的预算，否则一间房会白白少转一圈。
+                deadline += time.time() - before_wait
             now = time.time()
             if moving:
                 twist = Twist()
@@ -1218,15 +1346,15 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                     and (
                         (
                             target_owner_index is None
-                            and allowed_owner_indices is None
+                            and pending is None
                         )
                         or (
                             target_owner_index is not None
                             and result.get("owner_index") == target_owner_index
                         )
                         or (
-                            allowed_owner_indices is not None
-                            and result.get("owner_index") in allowed_owner_indices
+                            pending is not None
+                            and result.get("owner_index") in pending
                         )
                     )
                 )
@@ -1256,11 +1384,53 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                     if match_consecutive_count >= required_consecutive:
                         self.stop_base()
                         rospy.sleep(0.2)
-                        if followup:
-                            self.center_owner_in_camera(result)
-                            self.announce_owner_result(result)
-                            self.run_owner_action_recognition(result)
-                        return result
+                        if not collect_mode:
+                            if followup:
+                                self.center_owner_in_camera(result)
+                                self.announce_owner_result(result)
+                                self.run_owner_action_recognition(result)
+                            return result
+                        # ---- 一圈扫多人：就地处理这一位，然后接着转 ----
+                        # 他被确认的这一刻正在画面中间，所以居中/动作识别当场就能做，
+                        # 不需要再转回去找他。
+                        collected.append(result)
+                        if pending is not None:
+                            pending.discard(owner_index)
+                        rospy.loginfo(
+                            "这一圈确认第 %d 位：%s；这一圈还要认：%s",
+                            len(collected),
+                            result.get("owner_name", owner_index),
+                            "、".join(str(i) for i in sorted(pending))
+                            if pending
+                            else "（没有了）",
+                        )
+                        handle_started = time.time()
+                        handle_yaw_before = self.get_latest_yaw()
+                        try:
+                            stop_requested = bool(on_match(result))
+                        except Exception as exc:
+                            rospy.logwarn("on_match 处理这位主人时出错：%s", exc)
+                        # 处理期间花掉的时间和转动不算进"这一圈"：
+                        # 居中时会小幅转动，若算进去，圈还没转完就会被判成转满、
+                        # 提前结束扫描，把后面的人漏掉。
+                        deadline += max(0.0, time.time() - handle_started)
+                        handle_yaw_after = self.get_latest_yaw()
+                        if (
+                            handle_yaw_before is not None
+                            and handle_yaw_after is not None
+                        ):
+                            handle_delta = math.atan2(
+                                math.sin(handle_yaw_after - handle_yaw_before),
+                                math.cos(handle_yaw_after - handle_yaw_before),
+                            )
+                            if abs(handle_delta) < math.pi:
+                                rotated_angle -= handle_delta
+                        last_yaw = handle_yaw_after
+                        match_consecutive_count = 0
+                        last_match_owner_index = None
+                        if stop_requested:
+                            rospy.loginfo("收到「结束这一圈」的请求，提前停止扫描")
+                            break
                 else:
                     # 不做"一次失败就清零"：躺姿的姿态判定本身会抖动
                     # （同一个姿势可能这次判 lying、下次判 sitting），
@@ -1292,6 +1462,20 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             rospy.loginfo("Owner scan completed: rotated %.2f rad", rotated_angle)
         else:
             rospy.logwarn("No odom yaw received on %s; scan ended by timeout", self.odom_topic)
+        if collect_mode:
+            rospy.loginfo(
+                "这一圈共确认 %d 位主人：%s",
+                len(collected),
+                "、".join(str(item.get("owner_name", "")) for item in collected)
+                or "无",
+            )
+            self.publish_status(
+                "owner_scan_collected",
+                rotated_angle=rotated_angle,
+                collected=[item.get("owner_index") for item in collected],
+                stop_requested=stop_requested,
+            )
+            return collected
         final_not_found_text = self.owner_not_found_text if not_found_text is None else not_found_text
         if final_not_found_text:
             self.speak(final_not_found_text, wait=True)
@@ -1357,7 +1541,23 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             rospy.logwarn("InsightFace is not available: %s. Face fusion will be disabled.", exc)
             return
 
-        providers = ["CPUExecutionProvider"] if self.face_ctx_id < 0 else None
+        # 人脸推理设备：~face_ctx_id < 0 → CPU；>= 0 → CUDA（第 ctx_id 号卡）。
+        #
+        # 注意（2026-10-09 实测踩坑）：这里**必须显式写 provider**。
+        # onnxruntime 的 InferenceSession(providers=None) 不是"自动选最快的"，
+        # 而是"不指定执行提供者"= 只用 CPUExecutionProvider（源码
+        # onnxruntime_inference_collection.py: providers is None -> return [], []）。
+        # 之前的写法在 ctx_id>=0 时传 None，看着像开了 GPU，实际日志里是
+        # "Applied providers: ['CPUExecutionProvider']" —— 人脸一直在 CPU 上跑。
+        # 显式给出 ['CUDAExecutionProvider', 'CPUExecutionProvider'] 后：CUDA 可用就用
+        # GPU，装不上/加载失败时 ORT 会自己降级到列表里的 CPU，不会让注册流程挂掉。
+        if self.face_ctx_id < 0:
+            providers = ["CPUExecutionProvider"]
+        else:
+            providers = [
+                ("CUDAExecutionProvider", {"device_id": self.face_ctx_id}),
+                "CPUExecutionProvider",
+            ]
         try:
             self.face_app = FaceAnalysis(
                 name=self.face_model_name,
@@ -1371,9 +1571,11 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             )
             self.face_model_ready = True
             rospy.loginfo(
-                "InsightFace fusion ready: model=%s ctx_id=%d det_size=%d threshold=%.2f",
+                "InsightFace fusion ready: model=%s ctx_id=%d providers=%s "
+                "det_size=%d threshold=%.2f",
                 self.face_model_name,
                 self.face_ctx_id,
+                providers,
                 self.face_det_size,
                 self.face_accept_threshold,
             )
@@ -1405,6 +1607,7 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
 
         best_embedding = None
         best_area = 0.0
+        best_min_side = 0.0
         best_region = ""
         face_count = 0
         elapsed_ms = 0.0
@@ -1426,15 +1629,16 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 continue
             bbox = getattr(face, "bbox", None)
             if bbox is not None and len(bbox) >= 4:
-                area = max(0.0, float(bbox[2]) - float(bbox[0])) * max(
-                    0.0,
-                    float(bbox[3]) - float(bbox[1]),
-                )
+                face_w = max(0.0, float(bbox[2]) - float(bbox[0]))
+                face_h = max(0.0, float(bbox[3]) - float(bbox[1]))
+                area = face_w * face_h
             else:
                 area = 1.0
+                face_w = face_h = 0.0
             if area > best_area:
                 best_embedding = embedding
                 best_area = area
+                best_min_side = min(face_w, face_h)
                 best_region = region_name
             if best_embedding is not None:
                 break
@@ -1445,6 +1649,10 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             "embedding": best_embedding,
             "region": best_region,
             "face_count": face_count,
+            # 人脸框在裁剪图里的短边像素数。人脸越小，特征越不可信 ——
+            # 2~3 米外的人脸只有三四十像素，同一段视频里相似度能在 0.09~0.44
+            # 之间乱跳（实测），这种"人脸"不该有资格一票否决。
+            "min_side": best_min_side,
         }, elapsed_ms, "face ready"
 
     def parse_owner_name(self, answer):
@@ -2185,6 +2393,7 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             face_embedding = None
             face_region = ""
             face_count = 0
+            face_min_side = 0.0
             face_elapsed_ms = 0.0
             face_reason = "face disabled"
             if self.face_model_ready and face_profiles_ready:
@@ -2196,6 +2405,7 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                     face_embedding = face_data["embedding"]
                     face_region = face_data.get("region", "")
                     face_count = face_data.get("face_count", 0)
+                    face_min_side = float(face_data.get("min_side", 0.0) or 0.0)
             for owner_profile in self.owner_profiles:
                 variant_scores = []
                 for query_index, variant_name in zip(record["query_indexes"], record["variant_names"]):
@@ -2229,6 +2439,7 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                     "face_score": None if face_score is None else float(face_score),
                     "face_region": face_region,
                     "face_count": face_count,
+                    "face_min_side": face_min_side,
                     "face_elapsed_ms": face_elapsed_ms,
                     "face_reason": face_reason,
                     "match_threshold": match_threshold,

@@ -23,6 +23,7 @@ catkin_package(
 # 所以必须在这里登记，catkin 才会在 devel/lib/wpb_service_robot/ 下生成启动入口。
 catkin_install_python(PROGRAMS
   scripts/qwen_action_recognition_node.py
+  scripts/kinect2_stream_watchdog.py
   scripts/task_all_owners.py
   scripts/face_body_enroll_test.py
   scripts/owner_voice_reid_test.py

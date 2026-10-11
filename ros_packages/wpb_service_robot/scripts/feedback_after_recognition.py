@@ -70,6 +70,52 @@ VOICE_INTENT_NEXT_STEP = {
     "switch_off": "operate_switch",
 }
 
+# 电器开关的结果播报。
+# ⚠️ 现在是"只播报"版本：开关标记的视觉检测 + 机械臂对位硬件暂时不支持，
+# 所以主任务不发机械臂指令，只用话把开关的状态说清楚（判分依据本来就是语音播报）。
+# 等硬件/标记到位，把 operate_switch 里的机械臂那半补上即可，这几句话不用改。
+SWITCH_STATE_SPEECH = {
+    "switch_on": "好的，电器开关已经打开了。",
+    "switch_off": "好的，电器开关已经关掉了。",
+    "switch_declined": "好的，那我就不动电器开关了。",
+}
+
+# 从主人的一句话里听"要开 / 要关 / 不用"用的关键词（纯兜底，不是语义理解）。
+SWITCH_DECLINE_KEYWORDS = ("不用", "不需要", "不要", "别", "算了", "没事", "自己来")
+SWITCH_OFF_KEYWORDS = ("关闭", "关掉", "关上", "关一下", "关灯", "关")
+SWITCH_ON_KEYWORDS = ("打开", "开启", "开一下", "开灯", "开")
+
+
+def parse_switch_intent(transcript):
+    """主人说的那句话 -> switch_on / switch_off / switch_declined / None。
+
+    ⚠️ 先把"开关"这个词整个抠掉再匹配。不抠的话"帮我开一下**开关**"里的
+    "关"（来自"开关"这两个字）会被当成"要关"，意思正好反了 —— 这是这个
+    关键词兜底最容易踩的坑，单测里专门盯了这条。
+
+    这只是一个关键词兜底，不是语义理解：像"不要关灯"这种会判成"不用"。
+    等语音意图识别（或大模型）接进来，把这个函数换掉即可，调用方不用动。
+    """
+    text = str(transcript or "").strip()
+    if not text:
+        return None
+    text = text.replace("开关", "")
+    for keyword in SWITCH_DECLINE_KEYWORDS:
+        if keyword in text:
+            return "switch_declined"
+    for keyword in SWITCH_OFF_KEYWORDS:
+        if keyword in text:
+            return "switch_off"
+    for keyword in SWITCH_ON_KEYWORDS:
+        if keyword in text:
+            return "switch_on"
+    return None
+
+
+def switch_state_speech(intent):
+    """switch_on / switch_off / switch_declined -> 一句播报；认不出来的返回空串。"""
+    return SWITCH_STATE_SPEECH.get(str(intent or "").strip().lower(), "")
+
 
 class Feedback(object):
     """一次反馈的结果：说什么（speech）+ 接下来做什么（next_step）。"""

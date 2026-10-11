@@ -43,6 +43,12 @@
   <arg name="start_base" default="true" />
   <arg name="start_lidar" default="true" />
   <arg name="start_kinect" default="true" />
+  <!-- Kinect 的 qhd 点云/深度流。2026-10-09 相机掉线排查发现：这台机器上深度流
+       一帧都不出（bridge 日志 `depth processing: ~0Hz`），却照样占 USB 带宽、
+       也让 nodelet manager 多背一条流。跑 ⑫ 做相机稳定性 A/B 时可以传
+       `kinect_start_qhd_points:=false`（任务里"点云量距离"会自动退化成
+       "人体框高占比"估计，日志会写明是估计值）。 -->
+  <arg name="kinect_start_qhd_points" default="true" />
   <arg name="start_map_server" default="true" />
   <arg name="start_amcl" default="true" />
   <arg name="use_jie_lidar_loc" default="false" />
@@ -86,6 +92,7 @@
     <arg name="start_base" value="$(arg start_base)" />
     <arg name="start_lidar" value="$(arg start_lidar)" />
     <arg name="start_kinect" value="$(arg start_kinect)" />
+    <arg name="kinect_start_qhd_points" value="$(arg kinect_start_qhd_points)" />
     <arg name="start_map_server" value="$(arg start_map_server)" />
     <arg name="start_amcl" value="$(arg start_amcl)" />
     <arg name="use_jie_lidar_loc" value="$(arg use_jie_lidar_loc)" />

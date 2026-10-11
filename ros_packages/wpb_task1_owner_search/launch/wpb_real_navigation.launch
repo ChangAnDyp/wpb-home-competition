@@ -25,6 +25,13 @@
   <arg name="kinect_queue_size" default="2" />
   <arg name="kinect_worker_threads" default="2" />
   <arg name="kinect_start_qhd_points" default="true" />
+  <!-- 相机桥的 respawn。**必须为 true**：kinect2_owner_search.launch 里
+       stream_watchdog_restart_enabled 默认跟随 respawn，而看门狗恢复掉流的
+       手段就是 `rosnode kill` 掉 bridge、靠 roslaunch 把它重新拉起来。
+       这里原来写死 false —— 结果看门狗只能打日志
+       "Kinect2 stream stalled ... restart disabled"，永远不会自己重启 bridge，
+       现场表现为"相机掉流后再也回不来，只能人工重启整个栈"。 -->
+  <arg name="kinect_respawn" default="true" />
 
   <!-- Real robot TF tree. This mirrors wpb_home_bringup/launch/normal.launch. -->
   <param name="robot_description" command="$(find xacro)/xacro $(arg model)" />
@@ -57,7 +64,7 @@
     <arg name="queue_size" value="$(arg kinect_queue_size)" />
     <arg name="worker_threads" value="$(arg kinect_worker_threads)" />
     <arg name="start_qhd_points" value="$(arg kinect_start_qhd_points)" />
-    <arg name="respawn" value="false" />
+    <arg name="respawn" value="$(arg kinect_respawn)" />
   </include>
 
   <node if="$(arg start_map_server)" name="map_server" pkg="map_server" type="map_server" args="$(arg map)" />

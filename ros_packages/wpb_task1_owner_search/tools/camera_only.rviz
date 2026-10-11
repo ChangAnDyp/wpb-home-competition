@@ -1,0 +1,69 @@
+# 只看相机画面用的极简 RViz 配置（不加载机器人模型/点云，最省资源）。
+# 用法（另开一个终端，栈已经在跑）：
+#   rosrun rviz rviz -d ~/catkin_ws/src/wpb_task1_owner_search/tools/camera_only.rviz
+Panels:
+  - Class: rviz/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+      Splitter Ratio: 0.5
+    Tree Height: 700
+  - Class: rviz/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: Camera
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/Image
+      Enabled: true
+      Image Topic: /kinect2/qhd/image_color_rect
+      Max Rate: 15
+      Name: Camera
+      Queue Size: 2
+      Transport Hint: raw
+      Unreliable: false
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_footprint
+    Frame Rate: 15
+  Name: root
+  Tools:
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 3
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.3
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 0.785398
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 800
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Width: 1000
+  X: 60
+  Y: 40
