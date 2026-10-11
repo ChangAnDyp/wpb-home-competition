@@ -1,0 +1,83 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "起栈：启动机器人栈（含 TTS+ASR）",
+      "detail": "先拉起 Ollama，再启动 相机/雷达/Kinect/定位/导航/行人检测/语音播报+语音识别。约需 60~90 秒，之后再 F5 调试任务节点或主人注册",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "bash ${workspaceFolder}/competition/start_ollama.sh || true; source /opt/ros/noetic/setup.bash && source ${workspaceFolder}/devel/setup.bash && roslaunch wpb_task1_owner_search task1_owner_search_bringup.launch start_rviz:=false start_voice:=true start_tts:=true start_asr:=true"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "加载比赛参数到参数服务器",
+      "detail": "直接调试节点前必须执行一次；等价于 launch 文件里的 rosparam load。master 没起来会失败",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "source /opt/ros/noetic/setup.bash && source ${workspaceFolder}/devel/setup.bash && rosparam load ${workspaceFolder}/src/wpb_task1_owner_search/config/task1_owner_search_real.yaml /task1_find_owner_real && rosparam load ${workspaceFolder}/src/offline_voice_bridge/config/offline_voice.yaml /offline_tts_node 2>/dev/null; echo '比赛参数已加载到参数服务器'"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "停止全部 ROS 进程",
+      "detail": "等价于 robot.sh stop。改了代码想重跑时先执行它，避免残留进程占着 Kinect",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "bash ${workspaceFolder}/competition/robot.sh stop"],
+      "problemMatcher": []
+    },
+    {
+      "label": "打开 RViz（看地图 / 控制机器人移动）",
+      "detail": "机器人栈要先在跑（⑦/⑦b）。打开后：① 左键拖一下「2D Pose Estimate」点机器人实际位置和朝向（初始化 AMCL 定位，不点的话导航一定失败）；② 用「2D Nav Goal」点一个目标点，车自己开过去。⚠️ 任务脚本（⑬）在跑的时候也在发速度指令，两边会抢，别同时用",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "source /opt/ros/noetic/setup.bash && source ${workspaceFolder}/devel/setup.bash && rosrun rviz rviz -d ${workspaceFolder}/src/wpb_home/wpb_home_tutorials/rviz/nav.rviz"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "全功能体检",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "python3 ${workspaceFolder}/competition/feature_check.py --runtime"],
+      "problemMatcher": []
+    },
+    {
+      "label": "编译工作区 (catkin_make)",
+      "detail": "改了 C++ 或新增包之后要编译；纯 Python 改动不用",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "source /opt/ros/noetic/setup.bash && cd ${workspaceFolder} && catkin_make"
+      ],
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "重新生成 ros.env",
+      "detail": "改了工作区路径或重新编译后跑一次，调试用的环境变量文件才会更新",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "source /opt/ros/noetic/setup.bash && source ${workspaceFolder}/devel/setup.bash && O=${workspaceFolder}/.vscode/ros.env && : > $O && for v in ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROS_MASTER_URI ROS_ROOT ROS_ETC_DIR ROS_PACKAGE_PATH CMAKE_PREFIX_PATH PYTHONPATH LD_LIBRARY_PATH PKG_CONFIG_PATH HOME USER; do val=${!v:-}; [ -n \"$val\" ] && echo $v=$val >> $O; done; echo 已更新 $O"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "启动 Ollama（动作识别模型服务）",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "bash ${workspaceFolder}/competition/start_ollama.sh"],
+      "problemMatcher": []
+    }
+  ]
+}

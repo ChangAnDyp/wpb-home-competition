@@ -1,0 +1,722 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // ================================================================
+    //  ⓪ 调试前请先启动机器人栈（下面「任务」里有一键启动）。
+    //     节点必须连上 ROS master 才能真正跑起来。
+    // ================================================================
+
+    // ---------- ① 主任务节点（最常用）----------
+    // 先启动栈，再按 F5。preLaunchTask 会自动把比赛参数加载到参数服务器，
+    // 等价于 launch 文件里的 <rosparam load>；master 没起来时它会先报错提醒你。
+    // 【当前方案：现场注册】args 里的 _owner_enrollment_enabled:=true 让节点
+    // 不再读 data/owner 里的照片，改成开跑时语音问名字 + 现场拍脸。
+    // 需要栈带 ASR，所以请先用「①b」启动机器人栈，不要用「①」。
+    // 想切回【读照片】模式：把 args 里的 _owner_enrollment_enabled:=true 删掉。
+    {
+      "name": "①【节点】调试任务节点 task1_find_owner_real（需先起栈）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": ["_navigate_enabled:=false", "_owner_enrollment_enabled:=true"],
+      "preLaunchTask": "加载比赛参数到参数服务器",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ② 动作识别核心（可独立运行）----------
+    // 订阅相机后按空格触发一次识别，用来单独验证“坐/躺/挥手/摔倒”判定。
+    // _auto_repeat_seconds:=5  上一轮识别结束后隔 5 秒自动再识别（设 0 关掉，只按空格触发）
+    // _overlay_hold_seconds:=5 识别完成后把带框/关键点/结论的画面保持 5 秒
+    // _pose_device:=cuda:0     姿态模型跑 GPU（不可用时自动回退 CPU 并告警）
+    // _pose_half:=true         GPU 上使用 FP16 推理
+    {
+      "name": "② 调试动作识别 qwen_action_recognition_node",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search/scripts",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_auto_repeat_seconds:=5",
+        "_overlay_hold_seconds:=5.0",
+        "_pose_device:=cuda:0",
+        "_pose_half:=true",
+        "_pointcloud_furniture_height_limit:=0.40"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③ 主人注册 ----------
+    // 注意：这个脚本靠「语音问答」问名字，必须先跑 ① 把语音栈
+    // （offline_tts_node + ASR）启动起来。栈没起时它会停在
+    // "No TTS subscriber connected on /voice/say" 不动，不是死机。
+    // 参数说明：
+    //   _owner_count:=1        只注册 1 位主人（现在的陪练只有你一个人）。
+    //                          想恢复"注册 3 位"，把这行删掉即可；那样在第
+    //                          二/三位提问时说「跳过」也能跳过（第一位不能跳）。
+    //   _navigate_enabled:=false 注册完直接原地进入识别循环，不做导航。
+    {
+      "name": "③ 调试主人注册 owner_voice_reid_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": ["_owner_count:=1", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③b 主人注册（2 人）----------
+    // 和 ③ 完全一样，只把 _owner_count 改成 2：依次注册两位主人，
+    // 各自报名字（机器人会复述让你确认，务必核对）+ 站到镜头前采脸，
+    // 完成后写入 data/reid_owner/owner_profile_1 与 _2（会覆盖同名文件），
+    // 然后原地进入识别循环：两人轮流站到镜头前，看播报的名字对不对。
+    // 前提：机器人栈必须带 ASR（用 ⑦【起栈】，它带 start_asr:=true）。
+    {
+      "name": "③b 调试主人注册（2人）owner_voice_reid_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": ["_owner_count:=2", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③c 人脸 / 身形分步注册（2人）----------
+    // 与 ③b 的区别：姓名加"确认"环节，并且把人脸和身形分成两步采集。
+    //   第1步 问姓名 → 第2步 复述并确认（说"确认"或"重来"）
+    //   第3步 只采人脸 → 第4步 只采身形 → 存成一份带姓名的档案
+    // 注册完自动进入识别循环：识别眼前是谁并播报姓名。
+    // 前提：机器人栈必须带 ASR（用 ⑦【起栈】）。
+    {
+      "name": "③c 调试人脸/身形分步注册（2人）face_body_enroll_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/face_body_enroll_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": ["_owner_count:=2", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③d 全流程：注册 → 寻找 → 识别 → 动作 ----------
+    // 一条龙跑完：
+    //   1) 注册 2 位主人（第 2 位可说"跳过"）
+    //   2) 播报"开始寻找主人。"并原地旋转寻找
+    //   3) 找到后播报"找到主人XXX了，现在开始检测您的动作。"
+    //      然后只分析主人 ROI、只检测一次动作，播报动作后结束
+    // 前提：机器人栈必须带 ASR（用 ⑦ 或 ⑦b【起栈】）。
+    {
+      "name": "③d 调试全流程 注册+寻找+动作 enroll_search_action_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=3",
+        "_reuse_existing_profile:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③e 只测"找人"（跳过注册，复用已有档案）----------
+    // 每次跑 ③d 都要先注册两个人（约 2 分钟），调试找人逻辑时太慢。
+    // 这个配置直接读 data/reid_owner/owner_profile_1、_2 两份已存档案
+    // （张三 / 李4），跳过注册，直接进入"寻找主人"环节。
+    // 改完找人逻辑用它验证，速度快得多。
+    {
+      "name": "③e 只测找人（跳过注册）enroll_search_action_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③f 总任务：三人注册 + 逐位认人 + 报动作 ----------
+    // task_all_owners.py 是"总任务"编排层：注册 3 位主人 → 对每一位
+    // 单独旋转寻找（只认这一位）→ 居中 → 报姓名 → 调动作识别节点报动作。
+    // 与 ③d 的区别：③d 找到第一位就结束，③f 会把三位都找一遍。
+    // 注意它会注册 3 个人（约 3 分钟），只想测找人环节用 ③g。
+    {
+      "name": "③f 总任务 三人注册+逐位认人+动作 task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=3",
+        "_reuse_existing_profile:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ③g 总任务·只测找人（跳过注册）----------
+    // 直接读 data/reid_owner/owner_profile_1、_2 两份已有档案，跳过注册。
+    // 改完"逐位寻找"逻辑用它验证最快。以后补注册第 3 位，
+    // 把 _owner_count 改成 3 即可。
+    {
+      "name": "③g 总任务·只测找人（跳过注册）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ============================================================
+    //  新包 wpb_service_robot：总任务（注册 + 找人 + 识别动作）
+    //  与 ③f/③g 的区别：代码在新包里，路径/权重完全自洽，不再依赖
+    //  wpb_task1_owner_search。未完成的功能（导航/机械臂/电器开关/回出口）
+    //  以"预留接口"形式留在 scripts/task_all_owners.py 里。
+    //  前提：机器人栈要带 ASR（用 ⑦ 或 ⑦b【起栈】）。
+    // ============================================================
+
+    // ---------- ⑫ 新包·总任务（三人注册 + 逐位认人 + 动作）----------
+    // 导航已接上：注册完会依次导航去 living_room→kitchen→bedroom→canteen 找人。
+    // 每间房只转【一圈】：转到谁就当场居中/报姓名/测动作，处理完接着转，
+    // 所以同一间屋里站着两位主人也能在这一圈里都认出来（不用再转第二圈）。
+    // 三位都找到就提前收尾（剩下的房间不去），最后导航去 exit。
+    // 播报之后的实际反应：主人【挥手】时，机器人会走近他 →
+    // 问"请问您需要什么帮助？"→ 听主人说 → 复述"您需要的是：<原话>。"
+    // （规则 2.6-5 的判据就是"能够将主人的帮助需求以原意复述"，
+    //   所以旧实现"只问不听不复述"拿不到这 50 分；听不清会自动重问一轮。）
+    // 走近：用点云量真实距离，停到离主人 1.0 米（_approach_standoff_distance）；
+    // 点云不占显存（纯 CPU 搬运，实测 0.5ms/帧），看不到人就立刻停，不会盲开。
+    // 不想让它走 → _approach_enabled:=false；不想让它问 → _ask_help_enabled:=false。
+    // 主人【坐着/躺着】时，会问"需要我帮您操作电器开关吗？要打开还是关闭？"，
+    // 听懂后播报"电器开关已经打开了/关掉了"。
+    // ⚠️ 开关这一段**只播报，不动机械臂**：开关标记的视觉检测硬件暂时不支持，
+    //    所以主任务一条机械臂指令都不发（等硬件到位再补 operate_switch 里那半）。
+    //    不想让它问 → _ask_switch_enabled:=false。
+    // 【垃圾】已放弃（找垃圾要跑 YOLO-World，实测 CPU 占用太高，设备撑不住），
+    //    留了开关但不启用：_trash_announce_enabled:=false 显式关掉，
+    //    免得残留参数把它打开。代码还在 task_all_owners.py 里，没删。
+    // 时间预算按"注册也算在 8 分钟里"来算：注册约 2 分钟，剩约 6 分钟；
+    // 剩余时间不够『走一趟 + 转一圈』的房间直接不去，保证走得回出口。
+    // ⚠️ 机器人会真的走，请留出空间、手放急停；跑之前先确认定位好了：
+    //     rostopic echo -n1 /amcl_pose     能看到和实际位置一致的坐标
+    // 想不导航、原地转圈找（调试识别算法）→ 把 _navigate_enabled 改成 false。
+    // 想换房间顺序 / 少去几个房间 → 改 _search_waypoints。
+    {
+      "name": "⑫ 新包·总任务 三人注册+认人+动作 task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=3",
+        "_reuse_existing_profile:=false",
+        "_navigate_enabled:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room,kitchen,bedroom,canteen",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑬ 新包·只测找人（跳过注册，复用已有档案）----------
+    // 和 ⑫ 完全一样，只是跳过注册、直接用已有档案 —— 专门验证"逐房间导航 + 找人"。
+    // 同样会真的走，且同样显式写了 _navigate_enabled / _search_waypoints：
+    // 这两个参数如果哪次运行传过、残留在 ROS master 上，不写清楚就会被上次的值影响
+    // （踩过的坑：跑完 ③g 紧接着跑 ③f，③f 莫名其妙跳过了注册）。
+    {
+      "name": "⑬ 新包·只测找人（跳过注册）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room,kitchen,bedroom,canteen",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+
+    // ---------- ⑭ 新包·原地测找人（空跑：不移动）----------
+    // 用途：不想让车真的开去客厅，只想在**当前位置**把"到达客厅之后那一套"
+    //   测完（正在前往客厅 → 转一圈找人 → 居中 → 报姓名 → 测动作 → 反应 → 收尾）。
+    //   _navigate_dry_run:=true 让导航一步都不走，日志里会打
+    //   「空跑模式：不移动，直接当作已到达 living_room（客厅）」。
+    //   _search_waypoints 只留 living_room：只跑客厅这一间，测一轮约 1 分钟。
+    //   连"回出口"也不会动（同样被空跑挡住）。
+    //   想连"正在前往客厅寻找主人"那句都不说 → 加 _search_go_text:=
+    {
+      "name": "⑭ 新包·原地测找人（空跑不移动）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑭b 原地测找人·GPU 版（ReID + 姿态上显卡，A/B 对照用）----------
+    // 和 ⑭ 完全一样，只多了两个设备参数：
+    //   _reid_device:=cuda:0       主人 ReID（OSNet x0_25）从 CPU → GPU
+    //   _action_pose_device:=cuda:0 动作识别（YOLO11n-pose）从 CPU → GPU
+    //   _face_ctx_id:=0            人脸 InsightFace（检测 det_500m + 识别 w600k_mbf）→ GPU
+    // 人脸这块的坑（已解决）：onnxruntime 的 providers=None **不是"自动选最快的"**，
+    //   而是"不指定 EP"= 只用 CPU；且原装 onnxruntime 是 CPU 版。2026-10-09 已换成
+    //   onnxruntime-gpu 1.17.1（CUDA12 构建，匹配 torch 自带的 cuDNN 8），并在
+    //   owner_voice_reid_test.init_face_recognizer 里显式传
+    //   [('CUDAExecutionProvider',{'device_id':ctx_id}), 'CPUExecutionProvider']
+    //   （CUDA 加载失败会自动降级 CPU，不会让注册流程挂掉）。
+    // 显存预算（GTX 1650 4096MiB，基线 12MiB）— 全部是实测值：
+    //   ReID（OSNet，在任务进程）        ≈ 316 MiB
+    //   人脸（det+rec，同一任务进程）    ≈ 270 MiB
+    //   姿态（YOLO11n-pose，动作节点）   ≈ 180 MiB
+    //   合计 ≈ 0.77GB → 约占 19%，余量 >3GB（红线：超过 2.5GB 就回退）
+    // 风险与回退：显存不够时 ReID 加载会报错、动作节点会退化成 unknown；
+    //   把这三行参数删掉就回到 ⑭ 的纯 CPU 行为（节点自身也有 CUDA 不可用自动回退）。
+    //   跑的时候用 tools/resource_report.sh 看 nvidia-smi，超过 ~2.5GB 就该收手。
+    {
+      "name": "⑭b 原地测找人·GPU版（ReID+人脸+姿态上显卡）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_reid_device:=cuda:0",
+        "_action_pose_device:=cuda:0",
+        "_face_ctx_id:=0",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑭c 原地测找人·快速扫描版（方案 B，A/B 对照用）----------
+    // 与 ⑭ 完全一样，只多两条扫描参数：
+    //   _scan_angular_speed:=-0.40   转动速度 0.25 → 0.40 rad/s（14.3 → 22.9 °/s）
+    //   _scan_pause:=0.25            每个步进停顿 0.35 → 0.25 秒
+    // 400° 一圈的理论用时：
+    //   ⑭ ：转动 27.9s + 39 步 ×0.35s = 13.7s ≈ 41.5 秒
+    //   ⑭c：转动 17.5s + 39 步 ×0.25s =  9.8s ≈ 27.3 秒（省 ~14 秒/间，4 间 ~56 秒）
+    // 为什么只动这两个（不影响采样密度）：
+    //   · 速度上限由里程计保护值 ~scan_max_yaw_step(0.25 rad) 把关：0.40 rad/s 时
+    //     每个 10Hz 循环只转 0.05 rad（5 倍余量）；超过约 0.5 rad/s 才可能出现
+    //     "单次转角超限被丢弃 → 转过头"的风险，所以不建议再往上调。
+    //   · 停顿 0.25s 仍覆盖 ~match_check_interval(0.35s) 的大部分，站姿（要求连续
+    //     命中 2 次）基本不受影响；**步长没动**，角度采样密度与 ⑭ 相同。
+    // 对照方法：同一批主人、同一地点，⑭ 与 ⑭c 各跑 3 次，记录"找到人用时"和漏认次数。
+    {
+      "name": "⑭c 原地测找人·快速扫描版（方案B）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_scan_angular_speed:=-0.40",
+        "_scan_pause:=0.25",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑭d 摔倒靠近·导航版（方案 B-2，照 server_robot3 的策略）----------
+    // 与 ⑭b 完全一样，只把"摔倒靠近方式"换成 navigate：
+    //   _fall_approach_mode:=navigate
+    // 流程（三步，和参考实现 server_robot3 一致）：
+    //   ① 快照：在主人框里用**整条身体带 15%~85%** 取样点云，先按拟合出的地面线
+    //      剔掉贴地点，再取中位数 → 主人 3D 位置（前/侧）。这样取到的是**身体质心**，
+    //      不再是"上半个框"导致的一头（上一轮就是朝头/脚走的）。
+    //   ② 导航：把"主人前方 standoff 处"换算到 map 系交给 move_base（走 costmap，
+    //      会绕开旁边的家具）；发目标前用 /move_base/make_plan 预检路径绕不绕；
+    //      导航途中 /scan 前向护栏 0.40 m 兜底。
+    //      standoff 取 0.75 m 的原因：我们 costmap 是 robot_radius 0.25 +
+    //      inflation_radius 0.5 → move_base 无法把目标规划到离障碍 0.75 m 以内，
+    //      而躺在地上的人会被低装雷达当成障碍。
+    //   ③ 补齐：到位后再用里程计慢速贴最后一段，并且**用雷达判"贴近了没有"**：
+    //      走到雷达正前方 ≤ _fall_extra_close_scan_stop_distance(0.55 m) 就停
+    //      （<1 m 时相机已经看不到躺着的人，但 0.1 m 高的雷达一直看得到）+
+    //      盲走硬上限 _fall_extra_close_max_distance(0.40 m) + 硬护栏 0.32 m。
+    //      复测距离若比 standoff 还远 0.5 m 以上，判为"量错了"，只按 extra_close 补。
+    //      **想再靠近一点**：把 _fall_extra_close_scan_stop_distance 调到 0.50/0.45。
+    // 逐级回退：navigate 失败 → 快照式（B-1）→ 相机闭环（原逻辑），日志里会写清在哪一级失败。
+    // 排查：_fall_nav_standoff_distance(0.75)、_fall_nav_timeout(25)、_fall_nav_max_travel(1.5)、
+    //   _fall_nav_guard_distance(0.40)、_fall_nav_plan_check(True)、_fall_extra_close_distance(0.25)、
+    //   _fall_extra_close_max_distance(0.40)、_fall_extra_close_scan_stop_distance(0.55)、
+    //   _fall_creep_speed(0.08)、_fall_scan_guard_distance(0.32)、_fall_owner_band_low/high(0.15/0.85)、
+    //   _fall_floor_clearance(0.12)、_fall_tracking_min_iou(0.05)
+    // 现场先确认：a) 导航段能不能规划到 0.75 m 的 standoff（日志会打"路径预检通过/没过"和目标坐标）；
+    //   b) 最后 0.25 m 补齐后停在哪（期望 0.5 m 左右）。
+    {
+      "name": "⑭d 摔倒靠近·导航版（方案B-2）task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_reid_device:=cuda:0",
+        "_action_pose_device:=cuda:0",
+        "_face_ctx_id:=0",
+        "_fall_approach_mode:=navigate",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑮ 新包·注册+空跑去房间+真走近（现场测试正合这个）----------
+    // 这就是"去客厅不动、但检测到动作要走近时真动"的那套组合。
+    // 原理：两个开关互相独立 ——
+    //   _navigate_dry_run  只作用于"去航点"（navigate_to_waypoint），
+    //                      设 true 就当成"已经到客厅了"，直接原地转圈找人；
+    //   _approach_enabled  只作用于"走近主人"（挥手求助 / 摔倒协助那两条反应），
+    //                      默认就是 true，空跑**不会**把它关掉。
+    // 所以空跑只管"别开着车满屋跑"，该走近的时候照样真开车。
+    // _search_waypoints 只留 living_room：空跑时去别的房间也只是在原地再转一圈，
+    //   纯浪费时间；一个位置足够把"转圈找人 → 居中 → 报姓名 → 测动作 → 反应"走完。
+    // 对比：⑫ 是真导航（比赛用）；⑭ 是空跑但跳过注册、只跑 1 个房间。
+    // ⚠️ 想连"走近"也禁掉（整轮车完全不动）→ 再加 _approach_enabled:=false
+    // _action_pose_image_size:=640：动作识别用的姿态模型分辨率从默认 416 提到 640。
+    //   原因：坐着挥手时手臂贴着身体，416 分辨率下手腕关键点经常检不出来
+    //   （挥手的判据要求"手腕高于肩膀"，检不到手腕就永远判不出挥手）。
+    //   代价很小：旧日志里 5 秒采 9 帧、动作识别总共才 5.26 秒（推理只占 0.26 秒），
+    //   提到 640 大约变成 0.8 秒。先在 ⑮ 上验证，有效我再挪到 ⑫/⑬/⑭。
+    {
+      "name": "⑮ 新包·注册+空跑去房间+真走近 task_all_owners",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=3",
+        "_reuse_existing_profile:=false",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_approach_enabled:=true",
+        "_action_pose_image_size:=640",
+        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ④ 人体 ReID ----------
+    {
+      "name": "④ 调试人体 ReID person_reid_owner_test",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/person_reid_owner_test.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑤ 行人检测 ----------
+    {
+      "name": "⑤ 调试行人检测 yoloworld_async",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/yoloworld_async.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": ["_model_path:=${workspaceFolder}/src/yoloworld_perception/models/yolov8s-world-person.pt"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑥ 全功能体检（纯 Python，不需要 ROS master）----------
+    {
+      "name": "⑥ 全功能体检 feature_check.py",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/competition/feature_check.py",
+      "cwd": "${workspaceFolder}/competition",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑦ 用 roslaunch 启动整个栈 ----------
+    // 这里把 start_asr 打开，所以本配置启动的栈已经包含
+    // 语音播报 TTS + 语音识别 ASR，现场注册（①/③）可以直接用。
+    // 默认 start_asr 是 false，不开的话现场注册会报
+    // "owner enrollment ASR topic is not connected"。
+    // 【不再预启动 Ollama】新包和旧包的动作识别节点都已经是纯 YOLO-Pose
+    //   （grep ollama = 0），Qwen/Ollama 用不到了，留着它只会在起栈时
+    //   多出一堆代理/驱动告警（ollama 日志里 proxy 127.0.0.1:7897 连接被拒、
+    //   驱动 535 < 550），还慢 6 秒。
+    //   ⚠️ 唯一还在用 Ollama 的是旧包的单体节点 task1_find_owner_real.py
+    //   （电气开关意图识别 + Qwen 融合），配置 ①/⑪ 会跑它。要跑那两个的话，
+    //   先手动执行一次 Tasks →「启动 Ollama（动作识别模型服务）」。
+    // 【显式打开 TTS】start_voice 是总闸、start_tts 管播报、start_asr 管识别，
+    //   后两个只有在 start_voice=true 时才有意义；而且 bringup 里 start_asr
+    //   默认是 false、start_tts 默认 true。实测踩过一次"栈起来了但 TTS 没起"
+    //   （rosnode list 里只有 /offline_asr_node、没有 /offline_tts_node，
+    //   任务节点于是报 "No TTS subscriber connected on /voice/say"，全程哑巴）。
+    //   所以这里把 start_tts 显式写出来，别依赖默认值。
+    // map 指向新包里的比赛地图（wpb_service_robot/maps/map.yaml，
+    // 就是那台真机/真实场地那份 PGM，不是厂商教程里的图）。
+    // ⚠️ 光有地图还不够：导航前必须把机器人"现在在哪"告诉 AMCL，否则
+    //    move_base 一定规划不出来（日志里会一直导航超时/ABORTED）。
+    //    做法：起栈后 RViz 里用 "2D Pose Estimate" 点机器人实际位置 + 朝向，
+    //    然后 rostopic echo -n1 /amcl_pose 确认坐标和实际位置对得上。
+    {
+      "name": "⑦【起栈】ROS: 启动机器人栈（含 TTS+ASR）",
+      "type": "ros",
+      "request": "launch",
+      "target": "${workspaceFolder}/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
+      "arguments": [
+        "start_rviz:=false",
+        "start_asr:=true",
+        "start_tts:=true",
+        "map:=${workspaceFolder}/src/wpb_service_robot/maps/map.yaml"
+      ]
+    },
+
+    // ---------- ⑦b 起栈（注册专用：长语音窗口）----------
+    // 和 ⑦ 完全一样，只把 ASR 的采集窗口从 2 秒改回 4 秒。
+    // 原因：栈默认 asr_window_seconds:=2.0 是为了让现场问答反应快，
+    // 但报名字时一句话（"姓名张三"）很容易被 2 秒窗口切成
+    // "姓名张" / "姓名" / "装3" 这样的碎片，导致名字识别错。
+    // 做注册（③b / ③c）时用这个起栈；平时跑任务用 ⑦。
+    // ⚠️ 注意：能量阈值是在"软件增益放大之后"的信号上判断的，
+    // 所以 gain 和 energy_threshold 是一对耦合参数，不能只改一个。
+    // 实测教训：把 gain 2.0→1.0 同时 threshold 80→200，等于把灵敏度
+    // 要求提高约 5 倍，结果什么声音都进不来（连续报"等待姓名超时"）。
+    // 这里保持与 ⑦ 一致的采集参数，只改窗口长度这一个变量。
+    {
+      "name": "⑦b【起栈】注册专用（ASR 窗口 2.5 秒 + 语速 0.85）",
+      "type": "ros",
+      "request": "launch", 
+      "target": "${workspaceFolder}/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
+      "arguments": [
+        "start_rviz:=false",
+        "start_asr:=true",
+        "start_tts:=true",
+        "asr_window_seconds:=2.5",
+        "start_yolo:=false",
+        "tts_length_scale:=0.85",
+        "map:=${workspaceFolder}/src/wpb_service_robot/maps/map.yaml"
+      ]
+    },
+
+    // ---------- ⑧ 附加到运行中的节点 ----------
+    // 节点已在终端里跑着时，用它挂上调试器看变量
+    {
+      "name": "⑧ ROS: 附加到运行中的节点",
+      "type": "ros",
+      "request": "attach"
+    },
+
+    // ---------- ⑨ 反馈节点（识别之后"说什么"）----------
+    // 需要先起栈（⑦），并且要有动作识别结果在发布，否则收不到东西。
+    // 收到 /pose_action_recognition/result 就按「主人{姓名}正在{动作}」播报。
+    // 需要时的参数（加到下面 args 里）：
+    //   _owner_name:=张三                 主人姓名（脸部注册做完后由主任务传，这里留空）
+    //   _speak_enabled:=false             只打印不播报
+    //   _voice_feedback_enabled:=false    关掉语音输入分支
+    {
+      "name": "⑨ 调试反馈节点 feedback_after_recognition（需先起栈+⑩）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/feedback_after_recognition.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑩ 动作识别（静音版，专供配合⑨测试）----------
+    // 和 ② 完全一样，只多一个 _speak_enabled:=false。
+    // 原因：② 自己也会播报识别结果，两个一起跑会把同一句话念两遍。
+    // 测试反馈模块时用这个，让"说话"这件事只由反馈节点负责。
+    {
+      "name": "⑩ 调试动作识别（静音版，配合⑨）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search/scripts",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_auto_repeat_seconds:=5",
+        "_overlay_hold_seconds:=5.0",
+        "_pose_device:=cuda:0",
+        "_pose_half:=true",
+        "_pointcloud_furniture_height_limit:=0.40",
+        "_speak_enabled:=false"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑪ 接近主人（原地，不导航）----------
+    // 直接复用主任务节点①里真实的"找人 → 居中 → 识别动作 → 接近"链路，
+    // 只是关掉导航和现场注册，不需要 waypoints.xml。
+    //   _navigate_enabled:=false      不导航，原地开始（不需要航点文件）
+    //   _owner_enrollment_enabled:=false 跳过现场注册，用已存的主人照片
+    //   _allow_unverified_owner:=true 不强制人脸核验，便利用"接近"本身的测试
+    //   _task_waypoint_names:=approach_test 航点列表缩成 1 个，避免循环 4 次
+    //   _approach_navigation_enabled:=false 接近时不走 move_base，直接用
+    //     cmd_vel 朝主人开过去。原因：栈里加载的是厂商教程地图
+    //     (wpb_home_tutorials/maps/map.yaml)，和实际房间不匹配，move_base
+    //     规划必然失败（日志表现为 no global plan / large detour）。
+    //     只对"坐/躺/摔倒"这条路径有效；挥手那条只能用 move_base。
+    // ⚠️ 接近过程中机器人会真的向前移动，请留出空间并把手放在急停上。
+    {
+      "name": "⑪ 调试接近主人（原地，不导航）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
+      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_navigate_enabled:=false",
+        "_owner_enrollment_enabled:=false",
+        "_allow_unverified_owner:=true",
+        "_approach_navigation_enabled:=false",
+        "_action_use_owner_roi:=true",
+        "_owner_lock_enabled:=true",
+        "_task_waypoint_names:=approach_test"
+      ],
+      "preLaunchTask": "加载比赛参数到参数服务器",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ],
+  "compounds": [
+    // 一键同时启动「静音动作识别 + 反馈节点」，直接看端到端效果
+    {
+      "name": "【组合】动作识别⑩(静音) + 反馈⑨",
+      "configurations": [
+        "⑩ 调试动作识别（静音版，配合⑨）",
+        "⑨ 调试反馈节点 feedback_after_recognition（需先起栈+⑩）"
+      ],
+      "stopAll": true
+    }
+  ]
+}

@@ -21,6 +21,10 @@
 │   ├── start_ollama.sh           启动本地视觉模型服务
 │   ├── robot_selfcheck.sh        硬件自检（底盘/雷达/相机/声卡/GPU）
 │   └── pull_ollama_model.py      绕开 ollama 下载器装模型
+├── vscode/                       VS Code 调试配置（复制到 catkin_ws/.vscode/）
+│   ├── launch.json               25 个调试配置：起栈 / 注册 / 找人 / 动作识别 / 反应
+│   ├── tasks.json                一键起栈、加载比赛参数、停止进程
+│   └── ros.env.example           调试用环境变量模板（路径需按本机改）
 └── docs/                         备赛文档
     ├── 备赛方案.md               总体方案 + 比赛规则拆解 + 已踩的坑
     ├── 17天冲刺计划.md           倒排日程
