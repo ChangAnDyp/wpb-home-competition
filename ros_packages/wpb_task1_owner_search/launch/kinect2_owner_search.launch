@@ -48,6 +48,16 @@
        `depth processing: ~0Hz`），白白多占 USB 带宽和 CPU。做深度稳定性 A/B
        时可以传 `/kinect2/sd/camera_info` 打开。 -->
   <arg name="stream_watchdog_keepalive_depth" default="" />
+  <!-- 2026-10-17：深度流监控（只在动作节点运行时才订阅，省 USB/CPU）。
+       深度停发 3 秒报警；持续 12 秒（比一次 5 秒采集长）才重载 bridge，
+       避免把正在采集的动作打断。只动 bridge，不动 manager/USB。 -->
+  <arg name="stream_watchdog_depth_monitor" default="true" />
+  <arg name="stream_watchdog_depth_stall_seconds" default="3.0" />
+  <arg name="stream_watchdog_depth_restart_enabled" default="false" />
+  <arg name="stream_watchdog_depth_restart_after_seconds" default="12.0" />
+  <arg name="stream_watchdog_depth_cooldown" default="60.0" />
+  <arg name="stream_watchdog_depth_max_restarts" default="1" />
+  <arg name="stream_watchdog_depth_require_node" default="/owner_action_qwen" />
 
   <!-- nodelet manager：真正持有相机设备句柄的进程。
 
@@ -121,6 +131,15 @@
     <!-- 便宜的深度保活订阅：钉住 bridge 的"有订阅者"集合，
          避免 callbackStatus 触发 device->stop()/startStreams()。 -->
     <param name="keepalive_depth_topic" value="$(arg stream_watchdog_keepalive_depth)" />
+    <!-- 深度流监控（按需订阅 /kinect2/qhd/image_depth） -->
+    <param name="depth_monitor_enabled" value="$(arg stream_watchdog_depth_monitor)" />
+    <param name="depth_topic" value="/$(arg base_name)/qhd/image_depth" />
+    <param name="depth_stall_seconds" value="$(arg stream_watchdog_depth_stall_seconds)" />
+    <param name="depth_restart_enabled" value="$(arg stream_watchdog_depth_restart_enabled)" />
+    <param name="depth_restart_after_seconds" value="$(arg stream_watchdog_depth_restart_after_seconds)" />
+    <param name="depth_restart_cooldown" value="$(arg stream_watchdog_depth_cooldown)" />
+    <param name="depth_max_restarts" value="$(arg stream_watchdog_depth_max_restarts)" />
+    <param name="depth_require_node" value="$(arg stream_watchdog_depth_require_node)" />
     <!-- 带 root 的 sysfs authorized 软拔插脚本（见 tools/install_camera_usb_permission.sh）。
          没装也不影响：看门狗会自动退化成 USBDEVFS_RESET。 -->
     <param name="usb_power_cycle_command" value="/usr/local/sbin/kinect2-usb-powercycle" />

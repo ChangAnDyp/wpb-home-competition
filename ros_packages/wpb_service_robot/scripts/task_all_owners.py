@@ -66,7 +66,8 @@
   ~navigate_enabled          是否导航找人（默认 true；false = 原地转圈）
   ~navigate_dry_run          空跑：不真的开车，直接当作已到达每个航点（默认 false）
   ~waypoint_goal_timeout     单个航点的导航预算秒数，含重试（默认 45）
-  ~navigation_failure_limit  连续失败几次后放弃导航（默认 2）
+  ~navigation_failure_limit  同一目标（每间房/起点/回出口）连续失败几次就
+                             放弃该目标的导航（默认 3；下一间重新计数继续导航）
   ~min_room_scan_seconds     一间房至少留多少秒才值得进去扫（默认 40）
   ~competition_total_seconds 比赛总时长，用来算时间预算（默认 480 = 8 分钟）
   ~competition_exit_reserve_seconds  给回出口预留的秒数（默认 60）
@@ -85,10 +86,44 @@
                               IoU 下限（默认 0.15），低于它就不跟（防止被路人抢目标）
   ~approach_forward_speed     走近时的前进速度 m/s（默认 0.15）
   ~approach_max_seconds       走近最多花多少秒（默认 20）
+
+  挥手求助的"走近"从 2026-10-16 起改成**导航式**（和摔倒靠近同一套路），
+  原因见 approach_owner_navigate 的注释：老的 approach_owner 是纯相机闭环 + 直发
+  /cmd_vel，既不查 /scan 也不走代价地图，主人站在椅子后面挥手时会撞椅子腿。
+  ~approach_navigate_enabled   走近是否先用 move_base 走到 standoff 点（默认 true）
+                               关掉就退回老行为（纯相机闭环，**没有雷达护栏**）
+  ~approach_nav_stage_standoff_distance 中间点离主人多少米（默认 0 = 用
+                               approach_standoff_distance，即 1.0 m）
+  ~approach_nav_timeout        导航段最多多少秒（默认 25）
+  ~approach_nav_obstacle_retries 中间点被挡时换一侧重试几次（默认 1）
+  ~approach_nav_obstacle_shift 每次换边横移多少米（默认 0.35）
+  ~approach_nav_fallback_camera 导航没走通时是否退回相机闭环（默认 false =
+                               原地不动直接进入问答；true = 退回老办法，风险自负）
+  ~approach_face_first_enabled 导航前是否先原地"裸转正"（默认 false：裸转没有
+                               护栏，交给 move_base 自己转目标朝向更安全）
+  ~approach_face_first_max_angle 偏多少度以上才考虑转正（默认 0.35 rad）
+  ~approach_creep_max_distance 收尾允许用里程计"盲走"补齐的最大距离
+                               （**默认 0 = 不盲走**；站姿主人点云量得到，
+                                没必要盲贴。要给也只能给 0.1~0.2 兜底）
+  ~approach_finish_retries     收尾点云闭环最多再补几次（默认 1）
+  ~approach_owner_band_low/high 点云取"身体带"的高度比例（默认 0.15 / 0.85）
   ~ask_help_enabled           走近后是否问"请问您需要什么帮助"（默认 true）
   ~ask_help_retries           没听清时重问几轮（默认 1，即最多问 2 轮）
   ~ask_help_answer_timeout    每轮等主人回答的秒数（默认 8）
   ~listen_settle_seconds      收到第一条识别结果后再多等一窗，取更完整的那版（默认 2.2）
+
+雷达护栏（三条，全部可关）
+--------------------------
+  ~fall_scan_guard_distance   直行/爬行段的**正前方**硬护栏，米（默认 0.40）
+  ~scan_forward_half_angle_deg 上面那条护栏的角度窗口，±度（默认 25）
+  ~scan_turn_guard_distance   **原地旋转护栏**：全向（360°）最近距离 ≤ 这个值就
+                              暂停旋转/停止转正（默认 0.30；0=关闭）。
+                              车体旋转会横扫侧面的椅子腿，正前方窗口管不到，
+                              所以这条必须看全向。低于车体半径(0.25)没意义；
+                              调太大时，机器人停在离墙 0.3 m 处会把该房间的
+                              搜索卡住（日志/终端会打「旋转护栏」）。
+                              生效范围：转圈找人（scan_for_owner_for_target）、
+                              转正（rotate_toward_bearing）。
 
   挥手对话的三句话（规则 2.6-5 判据是"按原意复述"）：
     问：  请问您需要什么帮助？
@@ -295,13 +330,31 @@ class AllOwnersTask(FaceBodyEnrollTest):
         self.retry_navigation_after_clear = bool(
             rospy.get_param("~retry_navigation_after_clear", True)
         )
-        # 连续失败到这个次数就彻底不导航了。定位坏掉时每次导航都要干等一个
-        # 超时，4 个房间能把 8 分钟吃光；放弃导航虽然拿不到导航分，
-        # 但认人/动作那部分的分还能保住。
+        # 同一间房连续失败到这个次数，就**本间**放弃导航（成绩照旧保住），
+        # 但下一间房会重新计数、照常导航。
+        # 2026-10-16 现场改了语义：原来是"整场"计数 —— 前两间失败后整场都停用
+        # 导航，后面所有房间都变成"原地转圈"，现场看起来像车在乱跑
+        # （日志：导航连续失败 2 次…剩下的房间只做原地识别）。
+        # 现在按"目标"计数（每间房 / 起点 / 回出口各自清零），阈值也从 2 提到 3。
         self.navigation_failure_limit = max(
-            1, int(rospy.get_param("~navigation_failure_limit", 2))
+            1, int(rospy.get_param("~navigation_failure_limit", 3))
         )
         self.navigation_failure_count = 0
+        # 整场累计失败次数（只用于日志/复盘，不影响策略）
+        self.navigation_failure_total = 0
+        # ---- 开机硬件自检（2026-10-16 加，移植自 server_robot3 的
+        #      wait_for_hardware_inputs）--------------------------------------
+        # 为什么必须有：实测出现过"雷达没插 / ttyUSB 掉了"还照常起任务、
+        # 一路开出去的情况 —— AMCL 收不到激光就不再更新，代价地图也标不出障碍，
+        # 最后表现成"导航莫名其妙失败"，现场很难一眼看出根因。现在起任务先等
+        # /scan 和 /odom 真的出数据（相机已经在 wait_for_camera_inputs 里单独把关），
+        # 缺哪个就明确报出来并停车，不再盲开。
+        # 调试用（不想等/没接底盘）：_require_scan:=false _require_odom:=false
+        self.require_scan = bool(rospy.get_param("~require_scan", True))
+        self.require_odom = bool(rospy.get_param("~require_odom", True))
+        self.hardware_check_timeout = max(
+            1.0, float(rospy.get_param("~hardware_check_timeout", 30.0))
+        )
         # 航点名 → 播报用的中文名（说话时念"客厅"比念"living_room"自然）
         self.waypoint_speech_names = {
             "living_room": "客厅",
@@ -313,6 +366,35 @@ class AllOwnersTask(FaceBodyEnrollTest):
         self.search_go_text = rospy.get_param(
             "~search_go_text", "正在前往%s寻找主人。"
         )
+        # 备用航点（2026-10-15 现场要求）：形如 "bedroom2=bedroom"。
+        # 只有主航点那一间一个人都没找到时才去备用航点；主航点找到人就跳过它。
+        # _search_waypoints 里要把备用航点写在主航点后面，例如
+        #   living_room,kitchen,canteen,bedroom,bedroom2
+        self.fallback_waypoint_anchors = self.parse_fallback_waypoints(
+            rospy.get_param("~fallback_waypoints", "")
+        )
+        # 赛制（2026-10-16 确认）：**每个房间至多只有一位主人**。
+        # 所以"本间认到一位主人"就立刻结束这一间的扫描，直接去下一个航点，
+        # 不再为"同房间的第二位主人"多转一圈（一圈约 40 秒，纯浪费）。
+        self.one_owner_per_room = bool(
+            rospy.get_param("~one_owner_per_room", True)
+        )
+        # ---- 开局自动给 AMCL 一个初始位姿（2026-10-16）----
+        # 机器人按约定停在某个航点（默认 = 回出口的 exit，也就是"门口"），
+        # 开机直接把该航点的位姿发到 /initialpose，AMCL 立刻收敛 ——
+        # 省掉"每次起栈都去 RViz 点一次 2D Pose Estimate"。
+        # 机器人没停在那儿、或想自己微调：_auto_initial_pose:=false 回到手动点。
+        self.auto_initial_pose = bool(rospy.get_param("~auto_initial_pose", True))
+        self.auto_initial_pose_waypoint = str(
+            rospy.get_param("~auto_initial_pose_waypoint", "") or ""
+        ).strip()
+        self.auto_initial_pose_wait = max(
+            0.0, float(rospy.get_param("~auto_initial_pose_wait", 2.0))
+        )
+        self._initial_pose_pub = None
+        # 当前所在房间（航点名）：动作播报里要念出来（主人张三正在客厅坐着）。
+        # 由 run_waypoint_search_round 每进一间就更新。
+        self.current_room_waypoint = ""
 
         # ---- 比赛时间预算 ----
         # 8 分钟（480 秒）是规则给的时限。留 ~competition_exit_reserve_seconds
@@ -331,6 +413,17 @@ class AllOwnersTask(FaceBodyEnrollTest):
             1.0, float(rospy.get_param("~min_room_scan_seconds", 40.0))
         )
         self.competition_started_time = None
+        # ---- 时间预算开关（2026-10-16 现场要求）----
+        # 默认 **false = 不再用"已用时长"裁剪流程**：
+        #   · 不再因为"剩余时间不够"跳过一个房间；
+        #   · 不再因为剩余时间缩短单航点导航超时/单间扫描时长；
+        #   · 不再打印"比赛时间预算 | …"那些行；
+        # 各操作的固定超时（单航点 45s、单间扫描 90s、等）**保留**，
+        # 那是防卡死的安全边界，不是"计时统计"。
+        # 想恢复"8 分钟限时里自动取舍"：起栈传 _competition_time_budget_enabled:=true。
+        self.competition_time_budget_enabled = bool(
+            rospy.get_param("~competition_time_budget_enabled", False)
+        )
 
         # ---- 地面垃圾识别（"找到垃圾"60 分）----
         # 捡起 + 入桶做不了（没有抓取能力），但"找到垃圾并说出名字"本身就
@@ -502,6 +595,55 @@ class AllOwnersTask(FaceBodyEnrollTest):
         # 连续多久看不到主人就停下 —— 绝不"盲开"：人一走开就停。
         self.approach_lost_seconds = max(
             0.5, float(rospy.get_param("~approach_lost_seconds", 2.0))
+        )
+        # ---- 挥手求助"走近"改成导航式（2026-10-16）----
+        # 现场问题：开了雷达和硬护栏，挥手靠近时还是撞到椅子腿。原因不是护栏参数，
+        # 而是**这条路上根本没有护栏**：老的 approach_owner 是纯相机闭环 + 直发
+        # /cmd_vel，不查 /scan、也不走代价地图，雷达把椅子腿标进 costmap 对它没约束。
+        # 现在与摔倒靠近一致：点云快照出主人的 map 系位置 → 退 standoff 得到中间点
+        # → 交 move_base（走代价地图绕障，导航段带 /scan 硬护栏）→ 最后一段用点云
+        # 闭环（同样带 /scan 护栏）收到 approach_standoff_distance。
+        self.approach_navigate_enabled = bool(
+            rospy.get_param("~approach_navigate_enabled", True)
+        )
+        # 0 = 用 approach_standoff_distance 当中间点距离
+        self.approach_nav_stage_standoff_distance = max(
+            0.0, float(rospy.get_param("~approach_nav_stage_standoff_distance", 0.0))
+        )
+        self.approach_nav_timeout = max(
+            5.0, float(rospy.get_param("~approach_nav_timeout", 25.0))
+        )
+        self.approach_nav_obstacle_retries = max(
+            0, int(rospy.get_param("~approach_nav_obstacle_retries", 1))
+        )
+        self.approach_nav_obstacle_shift = max(
+            0.10, float(rospy.get_param("~approach_nav_obstacle_shift", 0.35))
+        )
+        # 导航没走通时：默认**原地不动**直接进入问答，不退回"没有护栏的相机闭环"。
+        self.approach_navigate_fallback_camera = bool(
+            rospy.get_param("~approach_navigate_fallback_camera", False)
+        )
+        self.approach_face_first_enabled = bool(
+            rospy.get_param("~approach_face_first_enabled", False)
+        )
+        self.approach_face_first_max_angle = max(
+            0.05, float(rospy.get_param("~approach_face_first_max_angle", 0.35))
+        )
+        # 挥手靠近最后**不盲走**（2026-10-16 现场要求）：站姿主人 1 m 内点云量得到，
+        # 没必要用纯里程计往前贴。默认 0 = 关闭；真需要兜底再手动给个 0.1~0.2。
+        self.approach_creep_max_distance = max(
+            0.0, float(rospy.get_param("~approach_creep_max_distance", 0.0))
+        )
+        # 收尾时点云闭环补几次（默认 1 = 最多再补一次，全程都有点云+护栏确认）
+        self.approach_finish_retries = max(
+            0, int(rospy.get_param("~approach_finish_retries", 1))
+        )
+        self.approach_owner_band_low = max(
+            0.0, min(0.80, float(rospy.get_param("~approach_owner_band_low", 0.15)))
+        )
+        self.approach_owner_band_high = max(
+            self.approach_owner_band_low + 0.05,
+            min(1.0, float(rospy.get_param("~approach_owner_band_high", 0.85))),
         )
         # 点云订阅是"要走近时才建"的（懒加载），没走近就不订，省一份订阅
         self.approach_pointcloud_sub = None
@@ -678,8 +820,10 @@ class AllOwnersTask(FaceBodyEnrollTest):
         )
         # /scan 前向硬护栏：爬行时正前方小于这个距离就立刻停（人本身也会被雷达看到，
         # 所以这个值要比 0.5 m 目标更小一点，只当"撞上东西了"的兜底）
+        # 2026-10-16 按用户要求 0.32 → 0.40：跟导航段的 _fall_nav_guard_distance
+        # 统一，留出更多安全余量（桌子/箱子的边沿、雷达噪点都更容易被挡住）。
         self.fall_scan_guard_distance = max(
-            0.20, float(rospy.get_param("~fall_scan_guard_distance", 0.32))
+            0.20, float(rospy.get_param("~fall_scan_guard_distance", 0.40))
         )
         self.scan_topic = str(rospy.get_param("~scan_topic", "/scan"))
         self.scan_forward_half_angle_deg = max(
@@ -687,7 +831,12 @@ class AllOwnersTask(FaceBodyEnrollTest):
         )
         self._scan_sub = None
         self._scan_forward_min = None
+        # 全向（360°）最近距离：原地旋转的护栏用它（正前方那条 25° 窗管不到侧面）
+        self._scan_any_min = None
         self._scan_stamp = 0.0
+        # 收到过任何一帧 /scan 的时刻（哪怕正前方没扫到有效点）—— 硬件自检用它
+        # 判断"雷达到底有没有在出数据"。
+        self._scan_msg_stamp = 0.0
         # ---- 摔倒靠近：B-2「快照 + move_base 避障 + 短距补齐」----------------
         # 取自参考实现（server_robot3）的策略：快照一次主人的 3D 位置 → 把
         # 「主人前方 standoff 处」换算到 map 系交给 move_base（走 costmap 绕障）
@@ -717,9 +866,66 @@ class AllOwnersTask(FaceBodyEnrollTest):
         self.fall_nav_guard_distance = max(
             0.20, float(rospy.get_param("~fall_nav_guard_distance", 0.40))
         )
+        # ---- 导航段的"看护循环"（2026-10-16 加，移植自 server_robot3 的
+        #      send_approach_navigation_goal）--------------------------------
+        # 原来的实现只盯雷达护栏 + move_base 最终状态，踩过两个坑：
+        #   ① move_base 报"成功"时其实还差一截（定位/局部规划器的误差）；
+        #   ② 规划器卡住不动，只能干等到 25 秒超时。
+        # 现在导航期间同时看：里程计走了多远（估算剩余）、实际速度（卡没卡住、
+        # 是不是已经慢停下来）、以及"有没有进展"，任何一条命中就提前结束这段。
+        self.fall_nav_watchdog_enabled = bool(
+            rospy.get_param("~fall_nav_watchdog_enabled", True)
+        )
+        # 慢停接收：剩余距离已经很小，而且"指令慢 + 实际也不动"连续这么多拍，
+        # 就当作到位（免得局部规划器在原地反复微调，把 25 秒耗光）。
+        self.fall_nav_slow_finish_enabled = bool(
+            rospy.get_param("~fall_nav_slow_finish_enabled", True)
+        )
+        self.fall_nav_slow_finish_speed = max(
+            0.005, float(rospy.get_param("~fall_nav_slow_finish_speed", 0.03))
+        )
+        self.fall_nav_slow_finish_cycles = max(
+            1, int(rospy.get_param("~fall_nav_slow_finish_cycles", 3))
+        )
+        self.fall_nav_slow_finish_tolerance = max(
+            0.05,
+            float(
+                rospy.get_param(
+                    "~fall_nav_slow_finish_tolerance",
+                    self.fall_nav_distance_tolerance,
+                )
+            ),
+        )
+        # move_base 报成功时的校验容差：里程计估算的剩余比它还大就认为"没到位"。
+        # 故意放宽到 0.5 m —— 里程计估的是弧长，比直线距离略大，不能卡太死。
+        self.fall_nav_arrival_tolerance = max(
+            0.10, float(rospy.get_param("~fall_nav_arrival_tolerance", 0.50))
+        )
+        # 卡死检测：这么久没有进展、而且线速度和角速度都约等于 0 → 判定卡住。
+        # 为什么还要看角速度：原地转向是正常的（先转正再走），不算卡死。
+        self.fall_nav_stuck_timeout = max(
+            2.0, float(rospy.get_param("~fall_nav_stuck_timeout", 6.0))
+        )
+        self.fall_nav_stuck_min_progress = max(
+            0.01, float(rospy.get_param("~fall_nav_stuck_min_progress", 0.05))
+        )
+        self.fall_nav_stuck_speed = max(
+            0.005, float(rospy.get_param("~fall_nav_stuck_speed", 0.025))
+        )
+        self.fall_nav_stuck_angular_speed = max(
+            0.01, float(rospy.get_param("~fall_nav_stuck_angular_speed", 0.05))
+        )
+        self.fall_nav_odom_speed_max_age = max(
+            0.1, float(rospy.get_param("~fall_nav_odom_speed_max_age", 0.6))
+        )
         # 发目标前用 /move_base/make_plan 预检：路径太绕（绕路比超限）就放弃，
         # 免得机器人绕过半个房间去"摸"人。
         self.fall_nav_plan_check = bool(rospy.get_param("~fall_nav_plan_check", True))
+        # 预检没过时是否**直接放弃**目标：
+        #   默认 False —— 现场要求"有障碍就交给 move_base 自己绕"，预检只是个提示，
+        #   不该成为拦路虎（实测 make_plan 对某些点位返回空路径，但 move_base 自己能开过去）。
+        #   设 True 才恢复"预检不过就换一侧/放弃"的老行为。
+        self.fall_nav_plan_block = bool(rospy.get_param("~fall_nav_plan_block", False))
         self.fall_nav_plan_service = str(
             rospy.get_param("~fall_nav_plan_service", "/move_base/make_plan")
         )
@@ -749,7 +955,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
         # 补齐段用**雷达**判断"到人还有多远"：躺着的人在很近时相机会丢，但雷达一直在
         # （0.1 m 高，看得到地上的人）。走到雷达正前方 ≤ 这个距离就停 —— 这是最可靠的
         # "贴近了没有"判据，也方便你调"再靠近一点"。
-        #   注意它比硬护栏 fall_scan_guard_distance(0.32) 大，是"软停车线"。
+        #   注意它比硬护栏 fall_scan_guard_distance(0.40) 大，是"软停车线"。
         self.fall_extra_close_scan_stop_distance = max(
             0.25, float(rospy.get_param("~fall_extra_close_scan_stop_distance", 0.55))
         )
@@ -793,7 +999,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
             0.15, float(rospy.get_param("~fall_anchor_depth_band", 0.70))
         )
         self.fall_anchor_min_points = max(
-            5, int(rospy.get_param("~fall_anchor_min_points", 25))
+            5, int(rospy.get_param("~fall_anchor_min_points", 15))
         )
         self._fall_last_sample_source = "band"
         # ---- 摔倒靠近：从"身体侧面"接近（不让机器人冲头/脚）------------------
@@ -804,11 +1010,34 @@ class AllOwnersTask(FaceBodyEnrollTest):
         self.fall_body_axis_enabled = bool(
             rospy.get_param("~fall_body_axis_enabled", True)
         )
+        # 默认**关**：侧向接近虽然更"安全"，但它要求机器人一边走一边转（实测目标
+        # 朝向比当前朝向差 50°），现场看起来就是"往一边跑"。改成：先原地转正对准
+        # 躯干 → 再沿视线靠近，用"离最近身体点保持 standoff"来防止冲头/脚。
         self.fall_side_approach_enabled = bool(
-            rospy.get_param("~fall_side_approach_enabled", True)
+            rospy.get_param("~fall_side_approach_enabled", False)
+        )
+        # 先转正：bearing 超过这个角度就先原地转，再靠近（用户要求"先正对再靠近"）
+        self.fall_face_first_enabled = bool(
+            rospy.get_param("~fall_face_first_enabled", True)
+        )
+        self.fall_face_first_max_angle = max(
+            0.05, float(rospy.get_param("~fall_face_first_max_angle", 0.15))
+        )
+        # 前向护栏触发时：如果主人就在跟前（点云量不到=太近/出画面，或 ≤ 1.6 m），
+        # 就当"已经到位"，别再退回 B-1/相机闭环（实测那一退整套动作就乱了）。
+        self.fall_nav_guard_is_arrival = bool(
+            rospy.get_param("~fall_nav_guard_is_arrival", True)
+        )
+        self.fall_nav_guard_arrival_distance = max(
+            0.5, float(rospy.get_param("~fall_nav_guard_arrival_distance", 1.6))
+        )
+        # 护栏那个"障碍"要和主人**对得上位置**才认（现场踩过：主人头旁边 20 cm 处
+        # 有个纸箱，雷达报的 0.4 m 是箱子不是人）。
+        self.fall_nav_guard_match_tolerance = max(
+            0.2, float(rospy.get_param("~fall_nav_guard_match_tolerance", 0.6))
         )
         self.fall_body_axis_min_spread = max(
-            0.10, float(rospy.get_param("~fall_body_axis_min_spread", 0.28))
+            0.10, float(rospy.get_param("~fall_body_axis_min_spread", 0.20))
         )
         self.fall_body_axis_max_radius = max(
             0.40, float(rospy.get_param("~fall_body_axis_max_radius", 1.10))
@@ -818,6 +1047,35 @@ class AllOwnersTask(FaceBodyEnrollTest):
         )
         self.fall_nav_side_extend_max = max(
             0.0, float(rospy.get_param("~fall_nav_side_extend_max", 0.45))
+        )
+        # ---- 2026-10-12 与用户商定的靠近流程 ---------------------------------
+        #   ① 摔倒确认瞬间冻结主人位置（快照）；
+        #   ② 先用 move_base 开到"正对主人中心、约 1 m"的中间点（距离不必精确，
+        #      有障碍就绕/换一侧）；
+        #   ③ 从中间点**直行闭环**（点云测距）走到 ~0.75 m；
+        #   ④ 盲走 0.25 m 到 ~0.5 m（带 /scan 软停车线）。
+        #   所有阶段 /scan 前向护栏都开着，防止撞到主人或家具。
+        self.fall_nav_stage_standoff_distance = max(
+            0.60, float(rospy.get_param("~fall_nav_stage_standoff_distance", 1.00))
+        )
+        self.fall_direct_stop_distance = max(
+            0.45, float(rospy.get_param("~fall_direct_stop_distance", 0.75))
+        )
+        # 中间点被真障碍挡住（现场：主人头边 20 cm 的纸箱）→ 目标点沿"接近方向的
+        # 垂直方向"平移这么多，换一侧重试；最多重试几次。
+        self.fall_nav_obstacle_retries = max(
+            0, int(rospy.get_param("~fall_nav_obstacle_retries", 2))
+        )
+        self.fall_nav_obstacle_shift = max(
+            0.10, float(rospy.get_param("~fall_nav_obstacle_shift", 0.40))
+        )
+        # 摔倒瞬间冻结的位置：B-2 走不通时，兜底也用它（不再依赖相机重新定位）
+        self._fall_frozen_snapshot = None
+        # 实地要求（2026-10-12）：B-2 / B-1 都没走通时，**不再**退到"看着人闭环"
+        # （那会在原地兜圈找画面），而是原地停下、直接做伸臂动作。
+        # 要恢复旧行为就 ~fall_camera_fallback_enabled:=true。
+        self.fall_camera_fallback_enabled = bool(
+            rospy.get_param("~fall_camera_fallback_enabled", False)
         )
         # 两人场景防串：采样框必须与"主人框"仍有重叠，且面积不能差太多
         self.fall_tracking_min_iou = max(
@@ -891,6 +1149,22 @@ class AllOwnersTask(FaceBodyEnrollTest):
         )
 
         self.search_start_text = rospy.get_param("~search_start_text", "开始寻找主人。")
+        # 注册完成 → "请志愿者就位" + 原地停 N 秒 → 再开始逐房间寻找（2026-10-15 现场要求）。
+        # 两个参数都可调：~search_ready_text 设成空串就不播；~search_ready_pause 设 0 就不停。
+        self.search_ready_text = rospy.get_param(
+            "~search_ready_text", "请志愿者就位，我即将开始寻找。"
+        )
+        self.search_ready_pause = max(
+            0.0, float(rospy.get_param("~search_ready_pause", 3.0))
+        )
+        # 开局先去哪个航点注册（2026-10-15 新流程）：例如 living_room。
+        # 空串 = 老流程（在起点原地注册）。到不了注册点也会继续就地注册，不中断。
+        self.start_waypoint = str(
+            rospy.get_param("~start_waypoint", "") or ""
+        ).strip()
+        self.start_waypoint_text = rospy.get_param(
+            "~start_waypoint_text", "正在前往%s进行注册。"
+        )
         self.search_each_text = rospy.get_param("~search_each_text", "正在寻找%s。")
         self.owner_action_start_text = rospy.get_param(
             "~owner_action_start_text", "找到主人%s了，现在开始检测您的动作。"
@@ -1112,14 +1386,21 @@ class AllOwnersTask(FaceBodyEnrollTest):
 
         下一步动作名由 feedback_after_recognition.py 统一定义，
         是"主流程"和"后续功能模块"之间的约定：
-          sitting / lying  -> ask_switch
+          sitting / lying  -> next_waypoint（**2026-10-16 现场改的**：
+                              不追问电器开关，播报完就直接继续下一个航点）
           fallen / sudden_fall -> approach_and_assist
           waving           -> approach_and_ask_help
           unknown          -> retry
+
+        播报里会带上**当前所在房间**（由当前航点名映射成中文，
+        例如 living_room → 客厅）："主人张三正在客厅坐着"。
         """
         try:
             feedback = self.feedback_module().feedback_for_action(
-                action, place, owner_name
+                action,
+                place,
+                owner_name,
+                room=self.current_room_speech_name(),
             )
             return feedback.speech, feedback.next_step
         except Exception as exc:
@@ -1152,6 +1433,35 @@ class AllOwnersTask(FaceBodyEnrollTest):
         return [str(item).strip() for item in raw_values if str(item).strip()]
 
     @staticmethod
+    def parse_fallback_waypoints(value):
+        """解析"备用航点"参数：`bedroom2=bedroom,kitchen2=kitchen` → {备用: 主航点}。
+
+        语义：只有当**主航点那一间一个人都没找到**时，才去备用航点；
+        主航点找到了人（哪怕还有别的主人没找到）就跳过备用航点。
+        分隔符 = 或 : 都行。
+        """
+        mapping = {}
+        if isinstance(value, (list, tuple)):
+            items = [str(item) for item in value]
+        else:
+            items = str(value or "").replace("；", ";").replace("，", ",").split(",")
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            if "=" in text:
+                fallback, anchor = text.split("=", 1)
+            elif ":" in text:
+                fallback, anchor = text.split(":", 1)
+            else:
+                continue
+            fallback = fallback.strip()
+            anchor = anchor.strip()
+            if fallback and anchor:
+                mapping[fallback] = anchor
+        return mapping
+
+    @staticmethod
     def parse_float_map(value):
         """把 "纸团:0.18,空瓶子:0.25" 或 {"纸团":0.18} 解析成 {中文名: 分数}。"""
         if value is None:
@@ -1180,13 +1490,220 @@ class AllOwnersTask(FaceBodyEnrollTest):
         return parsed
 
     def waypoint_speech_name(self, waypoint_name):
-        """航点名 → 播报用的中文名；没配过就原样返回。"""
+        """航点名 → 播报用的中文名；没配过就原样返回。
+
+        "同一个房间的另一个点位"（bedroom2 / kitchen_2 这种带尾部数字的）会先去掉
+        尾部数字再查一次：bedroom2 → bedroom → "卧室"。
+        这样 bedroom2 播报的是"正在前往卧室寻找主人"，不会冒出"次卧"。
+        如果某个点位想单独叫别的名字，在 waypoint_speech_names 里给它加一条即可
+        （显式配置优先于"去数字"）。
+        """
         key = str(waypoint_name or "").strip()
-        return self.waypoint_speech_names.get(key, key)
+        if not key:
+            return key
+        if key in self.waypoint_speech_names:
+            return self.waypoint_speech_names[key]
+        stripped = ""
+        for index in range(len(key) - 1, -1, -1):
+            if key[index].isdigit() or key[index] == "_":
+                continue
+            stripped = key[: index + 1]
+            break
+        if stripped and stripped in self.waypoint_speech_names:
+            return self.waypoint_speech_names[stripped]
+        return key
+
+    def current_room_speech_name(self):
+        """当前所在房间的中文名（动作播报用）：主人张三正在**客厅**坐着。
+
+        来源是"当前所在航点"（run_waypoint_search_round 每进一间就更新），
+        经 waypoint_speech_names 映射；没进过房间（原地测）就返回空串，
+        播报退回不带房间的老格式。
+        """
+        key = str(getattr(self, "current_room_waypoint", "") or "").strip()
+        if not key:
+            return ""
+        return self.waypoint_speech_name(key)
+
+    # ---- 开局自动设置 AMCL 初始位姿（替代手点 2D Pose Estimate）----
+    def publish_auto_initial_pose(self):
+        """把"机器人开机所在航点"的位姿发到 /initialpose，让 AMCL 立刻对上。
+
+        为什么可以这么做：比赛流程固定 —— 机器人就停在门口（= 回出口用的
+        `exit` 航点）起步。把这个航点在 map 系里的位姿当成初始位姿发出去，
+        等价于人在 RViz 里点一次 2D Pose Estimate 并把箭头拖到同一个位置。
+
+        航点表里没有对应航点 / 发不出去时只打 WARN，不中断流程
+        （那时照旧手动点一次就行）。
+        """
+        waypoint_name = (
+            self.auto_initial_pose_waypoint or self.exit_waypoint_name or ""
+        ).strip()
+        pose = None
+        if waypoint_name:
+            try:
+                pose = self.load_waypoint_pose(waypoint_name)
+            except Exception as exc:  # noqa: BLE001
+                rospy.logwarn(
+                    "自动初始位姿：读航点 %s 失败（%s），跳过", waypoint_name, exc
+                )
+        if pose is None:
+            rospy.logwarn(
+                "自动初始位姿：没有可用的航点（%s）→ 跳过，需要时手动点 2D Pose Estimate",
+                waypoint_name or "（未配置）",
+            )
+            return False
+        try:
+            from geometry_msgs.msg import PoseWithCovarianceStamped
+        except Exception as exc:  # noqa: BLE001
+            rospy.logwarn("自动初始位姿：导入消息类型失败（%s），跳过", exc)
+            return False
+        if self._initial_pose_pub is None:
+            self._initial_pose_pub = rospy.Publisher(
+                "/initialpose", PoseWithCovarianceStamped, queue_size=1
+            )
+        message = PoseWithCovarianceStamped()
+        message.header.frame_id = self.fall_nav_frame
+        message.pose.pose.position.x = float(pose["x"])
+        message.pose.pose.position.y = float(pose["y"])
+        message.pose.pose.position.z = 0.0
+        message.pose.pose.orientation.x = 0.0
+        message.pose.pose.orientation.y = 0.0
+        message.pose.pose.orientation.z = float(pose["z"])
+        message.pose.pose.orientation.w = float(pose["w"])
+        # 协方差照抄 RViz 的 2D Pose Estimate：位置 0.25 m²、朝向 0.0685 rad²
+        covariance = [0.0] * 36
+        covariance[0] = 0.25
+        covariance[7] = 0.25
+        covariance[35] = 0.0685
+        message.pose.covariance = covariance
+        # 发 3 次（AMCL 有时候第一帧还没订阅上），然后等一下让它收敛
+        for _ in range(3):
+            message.header.stamp = rospy.Time.now()
+            try:
+                self._initial_pose_pub.publish(message)
+            except Exception as exc:  # noqa: BLE001
+                rospy.logwarn("自动初始位姿：发布失败（%s）", exc)
+                return False
+            rospy.sleep(0.3)
+        rospy.loginfo(
+            "已自动设置 AMCL 初始位姿 = 航点 %s 的位姿（x=%.2f y=%.2f）；"
+            "等 %.1f 秒让它收敛",
+            waypoint_name,
+            float(pose["x"]),
+            float(pose["y"]),
+            self.auto_initial_pose_wait,
+        )
+        if self.auto_initial_pose_wait > 0.0:
+            rospy.sleep(self.auto_initial_pose_wait)
+        # 读一次 /amcl_pose 做对照，日志里能看出对不对得上
+        try:
+            from geometry_msgs.msg import PoseWithCovarianceStamped as _Pose
+
+            echoed = rospy.wait_for_message("/amcl_pose", _Pose, timeout=3.0)
+            position = echoed.pose.pose.position
+            rospy.loginfo(
+                "AMCL 现在认为机器人在 x=%.2f y=%.2f（设定值 x=%.2f y=%.2f，"
+                "差 %.2f m）",
+                position.x,
+                position.y,
+                float(pose["x"]),
+                float(pose["y"]),
+                math.hypot(position.x - float(pose["x"]), position.y - float(pose["y"])),
+            )
+        except Exception as exc:  # noqa: BLE001
+            rospy.logwarn_throttle(5.0, "读 /amcl_pose 对照失败：%s", exc)
+        return True
+
+    def report_manual_initial_pose(self):
+        """_auto_initial_pose:=false 时的开局提醒 + 位姿自检。
+
+        关掉自动初值以后，"机器人现在在哪"完全靠人在 RViz 里点 2D Pose Estimate。
+        点没点、点得对不对，日志里得能看出来，否则一起导航就又是
+        "Failed to get a plan." 白排查一轮。所以这里只做两件事：
+
+          1. 把当前 /amcl_pose 打出来，并在离最近航点超过 1.0 m 时提醒"可能点偏了"；
+          2. 提醒这一步是手动的，别忘。
+
+        只读，不发任何东西；收不到位姿也只是 WARN，不中断流程。
+        """
+        names = []
+        for name in [self.start_waypoint, self.exit_waypoint_name] + list(
+            self.search_waypoints
+        ):
+            name = str(name or "").strip()
+            if name and name not in names:
+                names.append(name)
+        try:
+            from geometry_msgs.msg import PoseWithCovarianceStamped
+
+            echoed = rospy.wait_for_message(
+                "/amcl_pose", PoseWithCovarianceStamped, timeout=3.0
+            )
+        except Exception as exc:  # noqa: BLE001
+            rospy.logwarn(
+                "自动初始位姿已关闭（_auto_initial_pose:=false），但读 /amcl_pose 失败：%s。"
+                "跑任务前请确认已经在 RViz 里点过 2D Pose Estimate。",
+                exc,
+            )
+            return False
+        position = echoed.pose.pose.position
+        quaternion = echoed.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
+            1.0 - 2.0 * (quaternion.y ** 2 + quaternion.z ** 2),
+        )
+        nearest = ""
+        nearest_distance = None
+        for name in names:
+            try:
+                pose = self.load_waypoint_pose(name)
+            except Exception:  # noqa: BLE001
+                continue
+            distance = math.hypot(position.x - pose["x"], position.y - pose["y"])
+            if nearest_distance is None or distance < nearest_distance:
+                nearest, nearest_distance = name, distance
+        if nearest:
+            rospy.loginfo(
+                "自动初始位姿已关闭（_auto_initial_pose:=false），用手点的 2D Pose Estimate："
+                "AMCL 现在认为机器人在 x=%.2f y=%.2f yaw=%.2f（离最近航点 %s 差 %.2f m）",
+                position.x,
+                position.y,
+                yaw,
+                nearest,
+                nearest_distance,
+            )
+            if nearest_distance > 1.0:
+                rospy.logwarn(
+                    "当前位姿离最近的航点 %s 还有 %.2f m（>1.0 m）。"
+                    "如果车其实停在门口，这个值偏大说明 2D Pose Estimate 点歪了 —— "
+                    "导航会照常失败，先重设一次再跑。",
+                    nearest,
+                    nearest_distance,
+                )
+        else:
+            rospy.logwarn(
+                "自动初始位姿已关闭（_auto_initial_pose:=false）：AMCL 现在认为机器人在 "
+                "x=%.2f y=%.2f，但没能读到任何航点做对照（检查 %s）",
+                position.x,
+                position.y,
+                self.waypoint_file,
+            )
+        return True
 
     # ---- 比赛时间预算 ----
     def competition_time_remaining(self):
-        """距比赛时限还剩多少秒；还没开始计时返回 inf。"""
+        """距比赛时限还剩多少秒；还没开始计时返回 inf。
+
+        2026-10-16 现场要求：默认**关掉"用时长裁剪流程"**——
+        这里直接返回 inf，于是下游全部失去约束：
+          · competition_should_wrap_up() 恒为假（不会因为"时间不够"跳过房间/提前收尾）；
+          · navigation_timeout_for() = 固定单航点超时（不再被剩余时间压缩）；
+          · room_scan_budget() = 固定单间扫描时长。
+        想恢复旧行为：起栈传 _competition_time_budget_enabled:=true。
+        """
+        if not getattr(self, "competition_time_budget_enabled", False):
+            return float("inf")
         if self.competition_started_time is None:
             return float("inf")
         return self.competition_total_seconds - (
@@ -1198,6 +1715,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
         return self.competition_time_remaining() <= self.competition_exit_reserve_seconds
 
     def log_time_budget(self, stage):
+        if not getattr(self, "competition_time_budget_enabled", False):
+            return   # 按现场要求：不再打印"已用/剩余"这些行
         remaining = self.competition_time_remaining()
         if remaining == float("inf"):
             return
@@ -1211,29 +1730,50 @@ class AllOwnersTask(FaceBodyEnrollTest):
 
     # ---- 导航失败计数 ----
     def note_navigation_failure(self, reason):
-        """记一次导航失败；连续失败到上限就不再用导航。
+        """记一次导航失败；**同一目标**连续失败到上限就放弃这个目标的导航。
 
         定位坏掉时（AMCL 没收敛、机器人位姿和地图对不上）每次导航都要干等一个
-        超时，4 个房间就能把 8 分钟全吃光。到上限后退回"就地找"：虽然没有导航
-        分，但认主人 / 动作 / 交互那部分的分还能拿。
+        超时，4 个房间就能把 8 分钟全吃光。到上限后这一间退回"就地找"：虽然没有
+        导航分，但认主人 / 动作 / 交互那部分的分还能拿；**下一间重新计数、继续导航**
+        （2026-10-16 现场要求：别再出现"前两间失败 → 后面所有房间都原地转"）。
         """
         self.navigation_failure_count += 1
+        self.navigation_failure_total += 1
         rospy.logwarn(
-            "导航失败 %d/%d（%s）",
+            "导航失败 %d/%d（本目标；全场累计 %d）（%s）",
             self.navigation_failure_count,
             self.navigation_failure_limit,
+            self.navigation_failure_total,
             reason,
         )
         if self.navigation_gave_up():
             rospy.logerr(
-                "导航连续失败 %d 次，已停止尝试导航：剩下的房间只做原地识别。"
-                "请检查 AMCL 初始位姿 / 地图是否和实际一致"
-                "（现场日志里 `到达航点` 一次都没出现过）。",
+                "导航连续失败 %d 次，**本目标**不再尝试导航，就地识别"
+                "（下一间房会重新计数、照常导航）。"
+                "如果每间都这样，请检查 AMCL 初始位姿 / 地图是否和实际一致、"
+                "通道里是否有人或家具挡住了"
+                "（当前 costmap：inflation_radius 0.40 m / robot_radius 0.25 m）",
                 self.navigation_failure_count,
             )
 
     def navigation_gave_up(self):
+        """当前目标的连续失败次数到上限（每个新目标开始时会清零）。"""
         return self.navigation_failure_count >= self.navigation_failure_limit
+
+    def reset_room_navigation_failures(self, target_name=""):
+        """开始一个新目标（每间房 / 起点 / 回出口）前，把"本目标连续失败"清零。
+
+        2026-10-16：失败计数从"整场"改成"按目标"，避免一间房卡住就让后面所有房间
+        都失去导航（现场表现是"后面全在原地乱转"）。
+        """
+        if self.navigation_failure_count:
+            rospy.loginfo(
+                "导航失败计数清零（上一目标 %d 次失败，全场累计 %d 次）%s",
+                self.navigation_failure_count,
+                self.navigation_failure_total,
+                ("，新目标：%s" % target_name) if target_name else "",
+            )
+        self.navigation_failure_count = 0
 
     # ---- 真正发目标 ----
     def navigation_timeout_for(self):
@@ -1313,7 +1853,9 @@ class AllOwnersTask(FaceBodyEnrollTest):
             return True
         if self.navigation_gave_up():
             rospy.logwarn(
-                "导航已因连续失败停用（%d 次），就地寻找", self.navigation_failure_count
+                "本目标导航已因连续失败跳过（%d 次），就地寻找"
+                "（下一个目标会重新计数）",
+                self.navigation_failure_count,
             )
             return False
 
@@ -1904,8 +2446,9 @@ class AllOwnersTask(FaceBodyEnrollTest):
         target_label = owner_name or "主人"
         has_pointcloud = self.ensure_approach_pointcloud()
         if str(self.approach_start_text or "").strip():
-            # wait=False：这句话和"开始走过去"并行，不额外花时间
-            self.speak(self.approach_start_text, wait=False)
+            # 同一次靠近只播一次（摔倒三级回退 / 挥手走近都适用）；
+            # 内部是 wait=False，和"开始走过去"并行，不额外花时间。
+            self.fall_speak_approach_start_once()
         rospy.loginfo(
             "开始走近%s：目标距离 %.2f 米（点云=%s），安全下限 %.2f 米，"
             "前进速度 %.2f m/s，最多 %.0f 秒",
@@ -2074,11 +2617,16 @@ class AllOwnersTask(FaceBodyEnrollTest):
         return math.atan2(math.sin(value), math.cos(value))
 
     def scan_callback(self, message):
-        """只记"正前方最近距离"（爬行/直行的硬护栏，不管有没有人都看一眼）。"""
+        """记两个数：正前方最近距离（爬行/直行的硬护栏）+ 全向最近距离（旋转护栏）。
+
+        全向那个是 2026-10-16 加的：车体原地旋转时扫到的是**侧面/斜后方**的东西
+        （现场撞过椅子腿），正前方 ±25° 那条护栏完全管不到。
+        """
         half = math.radians(self.scan_forward_half_angle_deg)
         range_min = max(0.05, float(getattr(message, "range_min", 0.0) or 0.0))
         range_max = min(3.0, float(getattr(message, "range_max", 0.0) or 3.0))
         best = None
+        best_any = None
         for index, raw in enumerate(getattr(message, "ranges", []) or []):
             try:
                 distance = float(raw)
@@ -2088,6 +2636,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 continue
             if distance < range_min or distance > range_max:
                 continue
+            if best_any is None or distance < best_any:
+                best_any = distance
             angle = float(message.angle_min) + index * float(message.angle_increment)
             if abs(math.atan2(math.sin(angle), math.cos(angle))) > half:
                 continue
@@ -2095,7 +2645,9 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 best = distance
         with self.lock:
             self._scan_forward_min = best
+            self._scan_any_min = best_any
             self._scan_stamp = time.time()
+            self._scan_msg_stamp = self._scan_stamp
 
     def ensure_scan_subscription(self):
         if self._scan_sub is not None:
@@ -2106,7 +2658,9 @@ class AllOwnersTask(FaceBodyEnrollTest):
             self._scan_sub = rospy.Subscriber(
                 self.scan_topic, LaserScan, self.scan_callback, queue_size=1
             )
-            rospy.loginfo("摔倒靠近：已订阅 %s 作前向护栏", self.scan_topic)
+            rospy.loginfo(
+                "已订阅 %s（硬件自检看数据、摔倒靠近当正前方护栏）", self.scan_topic
+            )
             return True
         except Exception as exc:  # noqa: BLE001 - 没护栏也要能跑
             rospy.logwarn("订阅 %s 失败（前向护栏不可用）：%s", self.scan_topic, exc)
@@ -2120,6 +2674,19 @@ class AllOwnersTask(FaceBodyEnrollTest):
             if time.time() - float(self._scan_stamp or 0.0) > 1.0:
                 return None
             return float(self._scan_forward_min)
+
+    def scan_any_min_distance(self):
+        """**全向**（360°）最小距离（米）；超过 1 秒没更新或没数据返回 None。
+
+        原地旋转的护栏用这个：正前方那条 `scan_forward_min_distance` 只有 ±25°，
+        车体旋转时会横扫侧面，必须看全向。
+        """
+        with self.lock:
+            if self._scan_any_min is None:
+                return None
+            if time.time() - float(self._scan_stamp or 0.0) > 1.0:
+                return None
+            return float(self._scan_any_min)
 
     def estimate_cloud_floor_line(self, cloud, band_count=6):
         """从点云画面下半部拟合地面线 y = a·z + b（相机光学系），拿不到返回 None。
@@ -2471,6 +3038,52 @@ class AllOwnersTask(FaceBodyEnrollTest):
             return None
         return (math.cos(theta), math.sin(theta), spread)
 
+    def body_obb_from_points(self, points, center):
+        """身体点 → 地面上的"旋转矩形"（OBB）：(cx, cy, ux, uy, half_len, half_wid)。
+
+        RViz 里用它画人体的**大致形状和位置**，比一堆散点直观得多：
+        长边=头↔脚方向，短边=身体宽度。点数太少或不成条返回 None。
+        """
+        axis = self.body_axis_from_points(points, center)
+        if axis is None:
+            return None
+        ux, uy = axis[0], axis[1]
+        px, py = -uy, ux
+        cx, cy = float(center[0]), float(center[1])
+        radius = self.fall_body_axis_max_radius
+        kept = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if math.hypot(float(point[0]) - cx, float(point[1]) - cy) <= radius
+        ]
+        if len(kept) < 20:
+            return None
+        along = [(point[0] - cx) * ux + (point[1] - cy) * uy for point in kept]
+        across = [(point[0] - cx) * px + (point[1] - cy) * py for point in kept]
+        along.sort()
+        across.sort()
+        # 取 5%~95% 分位当边长：避免一两个飞点把矩形撑大
+        def pct(values, ratio):
+            index = max(0, min(len(values) - 1, int(round((len(values) - 1) * ratio))))
+            return values[index]
+
+        low = pct(along, 0.05)
+        high = pct(along, 0.95)
+        left = pct(across, 0.05)
+        right = pct(across, 0.95)
+        centre_along = 0.5 * (low + high)
+        centre_across = 0.5 * (left + right)
+        half_len = max(0.10, 0.5 * (high - low))
+        half_wid = max(0.08, 0.5 * (right - left))
+        return (
+            cx + ux * centre_along + px * centre_across,
+            cy + uy * centre_along + py * centre_across,
+            ux,
+            uy,
+            half_len,
+            half_wid,
+        )
+
     def fall_standoff_goal_base(
         self, owner_x, owner_y, standoff, body_xy=None, label="主人"
     ):
@@ -2516,6 +3129,9 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 goal_x = float(owner_x) + approach[0] * effective
                 goal_y = float(owner_y) + approach[1] * effective
         info["standoff"] = effective
+        # 身体的大致形状（旋转矩形），给 RViz 画图 + 现场判断用
+        if body_xy:
+            info["obb"] = self.body_obb_from_points(body_xy, (owner_x, owner_y))
         # 朝向：从目标点看向身体中心
         face_x = float(owner_x) - goal_x
         face_y = float(owner_y) - goal_y
@@ -2682,6 +3298,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
         samples_base=None,
         body_base=None,
         axis_base=None,
+        obb_base=None,
         standoff_base=None,
         owner_map=None,
         goal_map=None,
@@ -2698,6 +3315,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
         颜色：红=主人估计点（躯干锚点算出来的），绿=standoff 目标点，蓝=机器人，
               青=**这次真正用来估位置的点**（躯干锚点窗口，只有一小撮，正常），
               灰=整条身体带的点（看身体轮廓用），黄线=身体主方向（头↔脚），
+              亮绿矩形=**人体大致形状**（旋转矩形：长边头↔脚、短边身体宽度），
               橙线=机器人→主人，绿线=主人→目标。
         """
         try:
@@ -2711,6 +3329,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 samples_base,
                 body_base,
                 axis_base,
+                obb_base,
                 standoff_base,
                 owner_map,
                 goal_map,
@@ -2721,7 +3340,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
             )
         except Exception as exc:  # noqa: BLE001
             # 调试可视化永远不许把"摔倒靠近"带崩
-            rospy.logwarn_throttle(10.0, "发布摔倒调试 Marker 失败（已忽略）：%s", exc)
+            rospy.logwarn("发布摔倒调试 Marker 失败（已忽略）：%s", exc)
+            self._fall_console("调试 Marker 发布失败（已忽略）：%s" % exc)
             return None
 
     def _publish_fall_debug_markers(
@@ -2732,6 +3352,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
         samples_base,
         body_base,
         axis_base,
+        obb_base,
         standoff_base,
         owner_map,
         goal_map,
@@ -2775,6 +3396,55 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     ],
                     (1.0, 1.0, 0.1),
                     0.04,
+                )
+            )
+
+        # 8/9) 人体大致形状：地面上的旋转矩形（长边=头↔脚，短边=身体宽）
+        if obb_base is not None:
+            cx, cy, ux, uy, half_len, half_wid = [float(v) for v in obb_base]
+            px, py = -uy, ux
+            corners = []
+            for sy, sx in ((-1, -1), (-1, 1), (1, 1), (1, -1), (-1, -1)):
+                corners.append(
+                    (
+                        cx + ux * half_len * sx + px * half_wid * sy,
+                        cy + uy * half_len * sx + py * half_wid * sy,
+                        0.07,
+                    )
+                )
+            frame = self.fall_nav_base_frame
+            # 有 map 位姿就画到 map 系（和机器人、目标点对齐看）。pose_map 必须是
+            # (x, y, yaw)；只给了 (x, y) 时退回机器人系，别让 Marker 整块发不出去。
+            if has_map and len(pose_map) >= 3:
+                frame = self.fall_nav_frame
+                x0m, y0m, yaw0m = pose_map[0], pose_map[1], pose_map[2]
+                cos_m, sin_m = math.cos(yaw0m), math.sin(yaw0m)
+                corners = [
+                    (
+                        x0m + cos_m * point[0] - sin_m * point[1],
+                        y0m + sin_m * point[0] + cos_m * point[1],
+                        point[2],
+                    )
+                    for point in corners
+                ]
+            markers.append(
+                self._fall_debug_line_marker(
+                    8, frame, corners, (0.15, 1.0, 0.15, 0.95), 0.05
+                )
+            )
+            if has_map:
+                text_x, text_y = corners[0][0], corners[0][1]
+            else:
+                text_x, text_y = cx, cy
+            markers.append(
+                self._fall_debug_text_marker(
+                    9,
+                    frame,
+                    text_x,
+                    text_y,
+                    0.30,
+                    "body %.2f x %.2f m" % (2.0 * half_len, 2.0 * half_wid),
+                    (0.4, 1.0, 0.4),
                 )
             )
 
@@ -2860,7 +3530,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
 
         # 这次没有数据的 id 显式删掉，免得上一轮的残留误导你
         used_ids = {marker.id for marker in markers}
-        for stale_id in (0, 1, 2, 3, 4, 5, 6, 7, 10, 11):
+        for stale_id in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             if stale_id in used_ids:
                 continue
             stale = self._fall_debug_base_marker(stale_id, frame, Marker.SPHERE)
@@ -2959,7 +3629,13 @@ class AllOwnersTask(FaceBodyEnrollTest):
         }
 
     def rotate_toward_bearing(self, bearing, label="主人", timeout=None):
-        """原地转到正对 bearing（rad，左正）；返回 True=对准。"""
+        """原地转到正对 bearing（rad，左正）；返回 True=对准。
+
+        2026-10-16 加**旋转护栏**：这一段是裸发 /cmd_vel、只看里程计，车体旋转时
+        会把侧面/斜后方的东西（椅子腿、桌腿）横扫进去。所以每拍都查一次
+        `scan_any_min_distance()`（全向），贴到车体（≤ ~scan_turn_guard_distance）
+        就立刻停止转动并返回 False —— 宁可没转正，也不许撞。
+        """
         limit = (
             self.fall_snapshot_align_timeout if timeout is None else max(0.5, float(timeout))
         )
@@ -2971,6 +3647,32 @@ class AllOwnersTask(FaceBodyEnrollTest):
         deadline = time.time() + limit
         rate = rospy.Rate(10)
         while not rospy.is_shutdown() and time.time() < deadline:
+            guard = getattr(self, "scan_any_min_distance", None)
+            turn_guard = None
+            if guard is not None:
+                try:
+                    turn_guard = guard()
+                except Exception:  # noqa: BLE001 - 护栏坏了也不能把靠近流程带崩
+                    turn_guard = None
+            guard_limit = float(getattr(self, "scan_turn_guard_distance", 0.0) or 0.0)
+            if turn_guard is not None and guard_limit > 0.0 and float(turn_guard) <= guard_limit:
+                self.stop_base()
+                rospy.logwarn(
+                    "%s：旋转护栏触发（全向最近 %.2f m ≤ %.2f m），停止转正"
+                    "（旁边有东西贴着车体，转过去就会撞）",
+                    label,
+                    float(turn_guard),
+                    guard_limit,
+                )
+                try:
+                    print(
+                        "[旋转护栏] %s：全向最近 %.2f m ≤ %.2f m，停止转正"
+                        % (label, float(turn_guard), guard_limit),
+                        flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
             yaw = self.get_latest_yaw()
             if yaw is None:
                 rate.sleep()
@@ -2993,15 +3695,20 @@ class AllOwnersTask(FaceBodyEnrollTest):
         rospy.logwarn("%s：转正超时（bearing %.3f rad 未到位）", label, bearing)
         return False
 
-    def drive_forward_until_cloud_close(self, bbox, label="主人"):
+    def drive_forward_until_cloud_close(self, bbox, label="主人", stop_distance=None):
         """直行，直到点云说"人已经近到快看不见"（或护栏/超时）。
 
         返回 (last_distance, reason)：
-          cloud_stop  = 云测到 ≤ fall_cloud_stop_distance
+          cloud_stop  = 云测到 ≤ stop_distance（默认 fall_cloud_stop_distance）
           cloud_lost  = 连续 0.5 s 量不到人（多半是掉出画面了）→ 该切爬行了
           scan_guard  = 前方障碍太近
           timeout     = 直行超时
         """
+        effective_stop = (
+            self.fall_cloud_stop_distance
+            if stop_distance is None
+            else max(0.35, float(stop_distance))
+        )
         deadline = time.time() + self.fall_snapshot_drive_timeout
         last_distance = None
         cloud_lost_since = None
@@ -3040,13 +3747,13 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     twist.angular.z = 0.0
                 else:
                     twist.angular.z = max(-0.35, min(0.35, 0.9 * bearing))
-                if last_distance <= self.fall_cloud_stop_distance:
+                if last_distance <= effective_stop:
                     self.stop_base()
                     rospy.loginfo(
                         "%s：点云距离 %.2f m ≤ %.2f m，停止直行，准备爬行收尾",
                         label,
                         last_distance,
-                        self.fall_cloud_stop_distance,
+                        effective_stop,
                     )
                     return last_distance, "cloud_stop"
             else:
@@ -3181,8 +3888,23 @@ class AllOwnersTask(FaceBodyEnrollTest):
             initial_bbox, label=label, band=band, floor_filter=True
         )
         if snapshot is None:
-            rospy.logwarn("%s：快照失败（拿不到主人点云位置），退回相机闭环", label)
-            return False
+            # 兜底：用 B-2 在"摔倒确认瞬间"冻结的那份位置（用户要求：兜底也要能贴到 0.5 m，
+            # 不能因为"现在看不见人"就放弃）。方位角按当前姿态近似为 0（人就在正前方）。
+            frozen = getattr(self, "_fall_frozen_snapshot", None)
+            if frozen:
+                rospy.logwarn(
+                    "%s：现在拿不到新的点云位置，改用摔倒瞬间冻结的位置"
+                    "（前=%.2f 侧=%.2f）继续",
+                    label,
+                    float(frozen.get("forward") or 0.0),
+                    float(frozen.get("lateral") or 0.0),
+                )
+                self._fall_console("%s：改用冻结位置继续（兜底）" % label)
+                snapshot = dict(frozen)
+                snapshot["bearing"] = 0.0
+            else:
+                rospy.logwarn("%s：快照失败（拿不到主人点云位置），退回相机闭环", label)
+                return False
         rospy.loginfo(
             "%s：快照位置 前=%.2f m 侧=%.2f m 距离=%.2f m bearing=%.3f rad"
             "（样本 %d 次 / %d 点）→ 先转正",
@@ -3195,7 +3917,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
             snapshot["points"],
         )
         if str(self.approach_start_text or "").strip():
-            self.speak(self.approach_start_text, wait=False)
+            # 只在第一次进"摔倒靠近"时播一次（B-2 失败回退到 B-1 不再重复播报）
+            self.fall_speak_approach_start_once()
 
         # ① 转正（按点云算出的 bearing，不看画面框中心）。
         #    只有"明显偏"才转：几度的偏差多半来自身体的横向延伸而不是"人在侧面"，
@@ -3253,8 +3976,25 @@ class AllOwnersTask(FaceBodyEnrollTest):
         except Exception:  # noqa: BLE001
             pass
 
-    def robot_pose_in_map(self):
-        """机器人当前位姿（map 系）→ (x, y, yaw, age)；拿不到返回 (None, None, None, None)。"""
+    def fall_speak_approach_start_once(self):
+        """摔倒靠近开始时那句"我这就过来"**只说一次**。
+
+        现场问题（2026-10-12）：B-2 失败回退到 B-1 时，两个分支各播一遍，
+        听起来像"连续播报我正在过去"。用一个标志位兜住，整次靠近只播一次。
+        """
+        if getattr(self, "_fall_approach_announced", False):
+            return False
+        self._fall_approach_announced = True
+        if str(self.approach_start_text or "").strip():
+            self.speak(self.approach_start_text, wait=False)
+            return True
+        return False
+
+    def robot_pose_in_map(self, timeout=1.0):
+        """机器人当前位姿（map 系）→ (x, y, yaw, age)；拿不到返回 (None, None, None, None)。
+
+        timeout 可调小：看护循环里每 0.5 秒查一次，用 1 秒的等待会把循环拖慢。
+        """
         if self._tf_buffer is None:
             try:
                 import tf2_ros
@@ -3276,7 +4016,7 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 self.fall_nav_frame,
                 self.fall_nav_base_frame,
                 rospy.Time(0),
-                rospy.Duration(1.0),
+                rospy.Duration(max(0.05, float(timeout))),
             )
         except Exception as exc:  # noqa: BLE001
             rospy.logwarn_throttle(
@@ -3354,40 +4094,274 @@ class AllOwnersTask(FaceBodyEnrollTest):
         except Exception as exc:  # noqa: BLE001
             return True, "make_plan 调用失败，跳过预检：%s" % exc
 
-    def navigate_fall_goal_with_guard(self, goal, timeout, label):
-        """发 move_base 目标并等结果；期间盯 /scan 前向护栏，太近就取消。返回 (ok, reason)。"""
+    def guard_obstacle_is_owner(self, owner_bbox):
+        """护栏触发时判断"挡在前面的到底是不是主人"。
+
+        低装雷达（0.1 m 高）看得到**躺在地上的人**，所以靠近到身体前会报 0.4 m 障碍
+        —— 但现场也踩过"主人头旁边 20 cm 处放着一个纸箱"，那时报的是箱子，不是人。
+        所以判据不能只看"有没有障碍"，要**对得上位置**：
+
+          ① 这一点云帧量不到主人 → 人已经太近/出画面 → 认定是主人；
+          ② 量得到主人，但主人还远（> ~fall_nav_guard_arrival_distance）→ 不是主人；
+          ③ 量得到主人且很近，但雷达障碍比主人**近太多**
+             （差值 > ~fall_nav_guard_match_tolerance，默认 0.6 m）→ 前面挡着的是别的东西。
+        """
+        try:
+            image, _ = self.snapshot()
+            if image is None or owner_bbox is None or len(owner_bbox) < 4:
+                return False
+            distance = self.owner_distance_from_pointcloud(owner_bbox, image.shape)
+        except Exception as exc:  # noqa: BLE001
+            rospy.logwarn("护栏判人失败（按\"不是主人\"处理）：%s", exc)
+            return False
+        if distance is None:
+            return True
+        distance = float(distance)
+        if distance > self.fall_nav_guard_arrival_distance:
+            return False
+        guard = self.scan_forward_min_distance()
+        if guard is not None and (distance - float(guard)) > self.fall_nav_guard_match_tolerance:
+            return False
+        return True
+
+    def navigate_fall_goal_with_guard(self, goal, timeout, label, owner_bbox=None):
+        """发 move_base 目标并等结果；期间同时盯**雷达护栏**和**看护循环**。
+
+        2026-10-16 加的看护循环（移植自 server_robot3 的
+        send_approach_navigation_goal），治的是实测踩过的两个坑：
+          · move_base 报"成功"时其实还差一截 —— 用里程计估算剩余，差太多判失败；
+          · 规划器/局部规划器卡住不动 —— 不用干等满 25 秒，提前取消并说明原因。
+        另外有"慢停接收"：剩余已经很小、而且实际也不动了，就当作到位
+        （局部规划器在终点前反复微调时，靠它把这一段收掉）。
+
+        雷达硬护栏保持最高优先级：撞到之前先停。返回 (ok, reason)。
+        """
         if not self.move_base.wait_for_server(
             rospy.Duration(min(5.0, self.move_base_server_timeout))
         ):
             return False, "move_base action server 不可用"
-        self.clear_move_base_costmaps("摔倒靠近前（%s）" % label)
+
+        # ---- 发目标前的准备：这一段要走多远、起点里程计在哪 ----
+        # 剩余距离用"这一段起点到目标的直线距离 − 里程计已走的弧长"来估。
+        # 为什么不每拍都查 TF：robot_pose_in_map 在 TF 不通时会阻塞，
+        # 10 Hz 的循环会被拖死；里程计是本地数据，够用且不会卡。
+        goal_xy = (
+            float(goal.target_pose.pose.position.x),
+            float(goal.target_pose.pose.position.y),
+        )
+        leg_distance = None
+        if (
+            self.fall_nav_watchdog_enabled
+            and str(goal.target_pose.header.frame_id or "") == self.fall_nav_frame
+        ):
+            pose_x, pose_y, _pose_yaw, _pose_age = self.robot_pose_in_map(timeout=0.3)
+            if pose_x is not None:
+                leg_distance = math.hypot(goal_xy[0] - pose_x, goal_xy[1] - pose_y)
+        start_xy = None
+        odom_x, odom_y, odom_age = self.get_latest_odom_xy()
+        if odom_x is not None and (odom_age is None or odom_age <= 1.0):
+            start_xy = (odom_x, odom_y)
+
+        # 这条日志两条路共用（摔倒靠近 / 挥手靠近），所以别写死"摔倒"字样
+        self.clear_move_base_costmaps("靠近前（%s）" % label)
+        send_time = time.time()
         self.move_base.send_goal(goal)
-        deadline = time.time() + max(2.0, float(timeout))
+        deadline = send_time + max(2.0, float(timeout))
+        best_remaining = leg_distance
+        last_progress_time = send_time
+        slow_finish_cycles = 0
+        remaining = None
+        rate = rospy.Rate(10)
+
         while not rospy.is_shutdown() and time.time() < deadline:
+            now = time.time()
+            # ---- ① 雷达硬护栏（最高优先级，撞之前先停）----
             guard = self.scan_forward_min_distance()
             if guard is not None and guard <= self.fall_nav_guard_distance:
                 self.move_base.cancel_goal()
                 self.stop_base()
+                # 拦在前面的很可能就是躺在地上的主人（雷达 0.1 m 高，看得到人）。
+                # 这种情况不要"放弃导航退回下一级"（实测一退整套动作就乱），
+                # 而是当成"已经走到跟前"，直接进补齐/协助。
+                if self.fall_nav_guard_is_arrival and self.guard_obstacle_is_owner(
+                    owner_bbox
+                ):
+                    self._fall_console(
+                        "%s：护栏触发 %.2f m，且主人就在跟前 → 当作到位（进补齐/协助）"
+                        % (label, guard)
+                    )
+                    return True, "前向护栏触发（前方 %.2f m），主人就在跟前 → 当作到位" % guard
+                self._fall_console(
+                    "%s：护栏触发 %.2f m，但对不上主人位置 → 判定是真障碍，取消导航"
+                    % (label, guard)
+                )
                 return False, "前方 %.2f m 有障碍（护栏 %.2f m），取消导航" % (
                     guard,
                     self.fall_nav_guard_distance,
                 )
-            if self.move_base.wait_for_result(rospy.Duration(0.2)):
-                break
+
+            # ---- ② 看护循环：剩余距离 / 卡死 / 慢停 ----
+            remaining = None
+            travelled = None
+            linear_speed = None
+            angular_speed = None
+            if self.fall_nav_watchdog_enabled:
+                current_x, current_y, current_age = self.get_latest_odom_xy()
+                if (
+                    start_xy is not None
+                    and current_x is not None
+                    and (current_age is None or current_age <= 1.0)
+                ):
+                    travelled = math.hypot(
+                        current_x - start_xy[0], current_y - start_xy[1]
+                    )
+                if leg_distance is not None and travelled is not None:
+                    remaining = max(0.0, leg_distance - travelled)
+                    if remaining + self.fall_nav_stuck_min_progress < (
+                        best_remaining if best_remaining is not None else remaining + 1.0
+                    ):
+                        best_remaining = remaining
+                        last_progress_time = now
+                linear_speed, angular_speed, _speed_age = self.get_latest_odom_speeds(
+                    max_age=self.fall_nav_odom_speed_max_age
+                )
+                # 还在走（或还在原地转正）都算"有进展"，不算卡死。
+                if linear_speed is not None and linear_speed > self.fall_nav_stuck_speed:
+                    last_progress_time = now
+                if (
+                    angular_speed is not None
+                    and abs(angular_speed) > self.fall_nav_stuck_angular_speed
+                ):
+                    last_progress_time = now
+
+                if (
+                    self.fall_nav_slow_finish_enabled
+                    and remaining is not None
+                    and linear_speed is not None
+                    and remaining <= self.fall_nav_slow_finish_tolerance
+                    and linear_speed <= self.fall_nav_slow_finish_speed
+                ):
+                    slow_finish_cycles += 1
+                    if slow_finish_cycles >= self.fall_nav_slow_finish_cycles:
+                        self.move_base.cancel_goal()
+                        self.stop_base()
+                        self._fall_console(
+                            "%s：慢停接收（剩余 %.2f m，实测速度 %.3f m/s）→ 当作到位"
+                            % (label, remaining, linear_speed)
+                        )
+                        return True, "慢停接收（剩余 %.2f m）" % remaining
+                else:
+                    slow_finish_cycles = 0
+
+                if (
+                    remaining is not None
+                    and now - last_progress_time >= self.fall_nav_stuck_timeout
+                    and linear_speed is not None
+                    and linear_speed <= self.fall_nav_stuck_speed
+                    and (
+                        angular_speed is None
+                        or abs(angular_speed) <= self.fall_nav_stuck_angular_speed
+                    )
+                ):
+                    self.move_base.cancel_goal()
+                    self.stop_base()
+                    return False, (
+                        "卡住/被挡住：%.0f 秒没有进展（剩余 %.2f m，速度 %.3f m/s）"
+                        % (self.fall_nav_stuck_timeout, remaining, linear_speed)
+                    )
+
+                if remaining is not None:
+                    rospy.loginfo_throttle(
+                        1.0,
+                        "%s：导航中 已走 %.2f m / 剩余约 %.2f m，速度 %.3f m/s，护栏 %s",
+                        label,
+                        travelled if travelled is not None else -1.0,
+                        remaining,
+                        linear_speed if linear_speed is not None else -1.0,
+                        "无" if guard is None else "%.2f m" % guard,
+                    )
+
+            # ---- ③ move_base 自己的状态 ----
+            state = self.move_base.get_state()
+            # 刚发出去的头 0.5 秒状态可能是上一单的残留，先不理会。
+            if now - send_time >= 0.5:
+                if state == GoalStatus.SUCCEEDED:
+                    self.stop_base()
+                    if remaining is None or remaining <= self.fall_nav_arrival_tolerance:
+                        return True, ""
+                    return False, (
+                        "move_base 报到达，但里程计估算还差 %.2f m（容差 %.2f）"
+                        % (remaining, self.fall_nav_arrival_tolerance)
+                    )
+                if state in (
+                    GoalStatus.PREEMPTED,
+                    GoalStatus.ABORTED,
+                    GoalStatus.REJECTED,
+                    GoalStatus.RECALLED,
+                    GoalStatus.LOST,
+                ):
+                    self.stop_base()
+                    return False, "move_base 状态 %s（未到达）" % state
+
             self.update_yolo_window(label)
+            rate.sleep()
+
+        self.move_base.cancel_goal()
+        self.stop_base()
         if rospy.is_shutdown():
-            self.move_base.cancel_goal()
-            self.stop_base()
             return False, "ROS 已关闭"
-        if not self.move_base.wait_for_result(rospy.Duration(0.0)):
-            self.move_base.cancel_goal()
-            self.stop_base()
-            return False, "导航超时（%.0f 秒）" % timeout
-        state = self.move_base.get_state()
-        if state != GoalStatus.SUCCEEDED:
-            self.stop_base()
-            return False, "move_base 状态 %s（未到达）" % state
-        return True, ""
+        return False, "导航超时（%.0f 秒）" % timeout
+
+    def fall_finish_approach(self, bbox, label, stage_distance=None):
+        """最后一段：**直行闭环**到 fall_direct_stop_distance → **盲走**补齐（两段都带 /scan 护栏）。
+
+        2026-10-12 与用户商定：
+          · 直行段用点云量距离（走到 ≈0.75 m）；
+          · 之后盲走 0.25 m 到 ≈0.5 m —— 1 m 以内相机看不到躺着的人，只能靠里程计，
+            但雷达软停车线（fall_extra_close_scan_stop_distance 0.55 m）始终开着，
+            撞到人或家具会先停。
+        返回 True（这一步不判定成败，到了就交给后面的协助动作）。
+        """
+        target = float(self.fall_approach_standoff_distance)
+        stop = float(self.fall_direct_stop_distance)
+        measured, reason = self.drive_forward_until_cloud_close(
+            bbox, label=label, stop_distance=stop
+        )
+        self._fall_console(
+            "%s：直行段结束（%s，点云最后距离=%s，停线 %.2f m）"
+            % (
+                label,
+                reason,
+                "无" if measured is None else "%.2f m" % float(measured),
+                stop,
+            )
+        )
+        if measured is not None:
+            remaining = float(measured) - target
+        else:
+            # 直行段点云先丢了（多半已经到 1 m 以内）：按"从停线再补一点"估
+            remaining = max(0.0, stop - target) + 0.15
+        remaining = max(0.0, min(self.fall_extra_close_max_distance, remaining))
+        if remaining > self.fall_creep_finish_tolerance:
+            done, travelled = self.creep_forward_by_odometry(
+                remaining,
+                label=label,
+                scan_stop_distance=self.fall_extra_close_scan_stop_distance,
+            )
+            rospy.loginfo(
+                "%s：盲走补齐 %.2f m / %.2f m 完成=%s（雷达软停车线 %.2f m）",
+                label,
+                travelled,
+                remaining,
+                done,
+                self.fall_extra_close_scan_stop_distance,
+            )
+            self._fall_console(
+                "%s：盲走 %.2f m / %.2f m 完成=%s" % (label, travelled, remaining, done)
+            )
+        else:
+            rospy.loginfo("%s：直行后已在目标距离内（还差 %.2f m）", label, remaining)
+        return True
 
     def approach_fallen_owner_navigate(self, owner_name="", initial_bbox=None):
         """摔倒靠近（B-2）：快照 3D 位置 → map 系 standoff 目标交 move_base → 里程计补齐。
@@ -3438,15 +4412,49 @@ class AllOwnersTask(FaceBodyEnrollTest):
             snapshot["samples"],
             snapshot["points"],
         )
-        if str(self.approach_start_text or "").strip():
-            self.speak(self.approach_start_text, wait=False)
+        # 摔倒靠近开始那句"我这就过来"：整次靠近只播一次（B-2/B-1/相机闭环共用同一个标志）
+        self.fall_speak_approach_start_once()
+
+        # ---- 阶段 1：先原地转正对准躯干（用户要求：先正对，再靠近）------------
+        # 为什么要有这一步：move_base 的目标朝向是"从目标点看向躯干"，如果当前朝向
+        # 差得多（实测差过 50°），局部规划器一上来就原地大转弯，现场看起来就是
+        # "往一边跑、完全不是人的方向"。先原地转正，后面就是一条近乎直线的靠近。
+        bearing = float(snapshot.get("bearing") or 0.0)
+        if self.fall_face_first_enabled and abs(bearing) > self.fall_face_first_max_angle:
+            self._fall_console(
+                "%s：阶段1 先转正对准躯干（bearing=%.3f rad）" % (label, bearing)
+            )
+            aligned = self.rotate_toward_bearing(bearing, label=label)
+            self._fall_console(
+                "%s：阶段1 %s" % (label, "已对准" if aligned else "转正超时（继续按原位置算）")
+            )
+            if aligned:
+                again = self.capture_fallen_owner_snapshot(
+                    snapshot.get("bbox"), label=label, band=band, floor_filter=True
+                )
+                if again is not None:
+                    snapshot = again
+                    distance = float(snapshot["distance"])
+                    self._fall_console(
+                        "%s：转正后复测 前=%.2f 侧=%.2f 距离=%.2f bearing=%.3f"
+                        % (
+                            label,
+                            float(snapshot["forward"]),
+                            float(snapshot["lateral"]),
+                            distance,
+                            float(snapshot.get("bearing") or 0.0),
+                        )
+                    )
 
         # 主人在机器人系里的位置：点云量的是"到相机"，补上相机相对 base 的前向偏移。
         # 这一段与位姿无关，先算出来：① "已在 standoff 附近"分支要用；
         # ② 调试可视化要用；③ 后面转 map 系只是加一次旋转平移。
         owner_x = float(snapshot["forward"]) + self.approach_camera_forward_offset
         owner_y = float(snapshot["lateral"])
-        standoff = max(0.35, self.fall_nav_standoff_distance)
+        # 冻结"摔倒瞬间认定的主人位置"：B-2 万一半路失败，兜底也用它（不再靠相机重新定位）
+        self._fall_frozen_snapshot = dict(snapshot)
+        # 中间点用 stage（默认 1.0 m，距离不必精确）；最后一段再直行到 0.75 m + 盲走 0.25 m
+        standoff = max(0.60, float(self.fall_nav_stage_standoff_distance))
         # 目标点：默认在"主人→机器人"连线上退 standoff；有身体主方向时退到**身体侧面**
         # （避免从头/脚方向怼过去），并保证目标点离任何身体点 ≥ fall_nav_body_clearance。
         goal_x_base, goal_y_base, face_yaw_rel, goal_info = self.fall_standoff_goal_base(
@@ -3480,13 +4488,13 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 half,
             )
 
-        # 已经在 standoff 附近：不导航，直接补齐最后一段
-        if distance - self.fall_nav_standoff_distance <= self.fall_nav_distance_tolerance:
+        # 已经在中间点附近：不导航，直接进"直行闭环 + 盲走收尾"
+        if distance - standoff <= self.fall_nav_distance_tolerance:
             rospy.loginfo(
-                "%s：已在 standoff 附近（%.2f m ≤ %.2f + %.2f），跳过导航直接补齐",
+                "%s：已在中间点附近（%.2f m ≤ %.2f + %.2f），跳过导航直接直行+盲走",
                 label,
                 distance,
-                self.fall_nav_standoff_distance,
+                standoff,
                 self.fall_nav_distance_tolerance,
             )
             # 这个分支还没查 TF，Marker 就按机器人系画（RViz 会用 TF 摆正）
@@ -3496,23 +4504,17 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 samples_base=snapshot.get("points_xy"),
                 body_base=snapshot.get("body_xy"),
                 axis_base=axis_marker,
+                obb_base=goal_info.get("obb"),
                 standoff_base=(goal_x_base, goal_y_base),
                 owner_distance=distance,
                 standoff_distance=standoff,
                 note="already near standoff",
             )
-            creep = max(0.0, min(self.fall_creep_max_distance, distance - target))
-            creep = min(creep, self.fall_extra_close_max_distance)
             self._fall_console(
-                "%s：已在 standoff 附近，直接补齐 %.2f m" % (label, creep)
+                "%s：已在中间点附近（%.2f m），跳过导航，直接直行+盲走收尾"
+                % (label, distance)
             )
-            if creep > self.fall_creep_finish_tolerance:
-                self.creep_forward_by_odometry(
-                    creep,
-                    label=label,
-                    scan_stop_distance=self.fall_extra_close_scan_stop_distance,
-                )
-            return True
+            return self.fall_finish_approach(snapshot.get("bbox"), label)
 
         pose = self.robot_pose_in_map()
         if pose[0] is None:
@@ -3553,97 +4555,405 @@ class AllOwnersTask(FaceBodyEnrollTest):
             samples_base=snapshot.get("points_xy"),
             body_base=snapshot.get("body_xy"),
             axis_base=axis_marker,
+            obb_base=goal_info.get("obb"),
             standoff_base=(goal_x_base, goal_y_base),
             owner_map=(owner_map_x, owner_map_y),
             goal_map=(goal_x, goal_y),
-            pose_map=(x0, y0),
+            pose_map=(x0, y0, yaw0),
             owner_distance=distance,
             standoff_distance=standoff,
             note="goal standoff %.2fm" % standoff,
         )
-        plan_ok, plan_reason = self.fall_nav_plan_ok((x0, y0), (goal_x, goal_y))
-        if not plan_ok:
-            rospy.logwarn("%s：路径预检没过（%s），退回下一级", label, plan_reason)
-            self._fall_console("%s：路径预检没过（%s）→ 退回下一级" % (label, plan_reason))
-            return False
-        self._fall_console(
-            "%s：目标 map=(%.2f, %.2f)（%s）" % (label, goal_x, goal_y, plan_reason)
-        )
-        rospy.loginfo("%s：路径预检通过（%s）", label, plan_reason)
+        # ---- 中间点：正中一个候选 + 被障碍挡住时"换一侧"的候选 -----------------
+        vector_x = goal_x_base - owner_x
+        vector_y = goal_y_base - owner_y
+        norm = max(1e-6, math.hypot(vector_x, vector_y))
+        perp_x, perp_y = -vector_y / norm, vector_x / norm
+        offsets = [0.0]
+        for index in range(self.fall_nav_obstacle_retries):
+            magnitude = self.fall_nav_obstacle_shift * (index + 1)
+            offsets.extend([magnitude, -magnitude])
 
-        goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = self.fall_nav_frame
-        goal.target_pose.header.stamp = rospy.Time.now()
-        goal.target_pose.pose.position.x = goal_x
-        goal.target_pose.pose.position.y = goal_y
-        goal.target_pose.pose.position.z = 0.0
-        goal.target_pose.pose.orientation.z = math.sin(goal_yaw / 2.0)
-        goal.target_pose.pose.orientation.w = math.cos(goal_yaw / 2.0)
-        ok, reason = self.navigate_fall_goal_with_guard(
-            goal, self.fall_nav_timeout, label
-        )
-        self._fall_console(
-            "%s：move_base 结果 ok=%s（%s）" % (label, ok, reason or "到达")
-        )
-        if not ok:
-            rospy.logwarn("%s：move_base 没走到目标（%s），退回下一级", label, reason)
-            return False
-        rospy.loginfo("%s：已到 standoff 点，开始补齐最后一段", label)
-
-        # 到位后补齐最后一段：优先信"重新快照的距离"，拿不到就用 导航standoff − 目标
-        remaining = None
-        again = self.capture_fallen_owner_snapshot(
-            snapshot.get("bbox"), label=label, band=band, floor_filter=True
-        )
-        unreliable_after = self.fall_nav_standoff_distance + self.fall_extra_close_reject_margin
-        if again is not None:
-            measured = float(again["distance"])
-            rospy.loginfo(
-                "%s：导航后复测主人距离 %.2f m（目标 %.2f m）", label, measured, target
-            )
-            if measured <= unreliable_after:
-                remaining = measured - target
-            else:
-                # 导航已经走到 standoff 了，复测却比 standoff 还远一大截 → 这一帧八成
-                # 又量到别人/别处（现场实测复测过 2.73 m，而实际已经很近）。这时**不按
-                # 那个假距离补**，只按配置的 extra_close 补一点。
-                rospy.logwarn(
-                    "%s：复测 %.2f m 比 standoff %.2f m 还远（> +%.2f m），判定复测不可信，"
-                    "改为按配置 extra_close=%.2f m 补齐",
-                    label,
-                    measured,
-                    self.fall_nav_standoff_distance,
-                    self.fall_extra_close_reject_margin,
-                    self.fall_extra_close_distance,
+        ok = False
+        reason = "未尝试"
+        for attempt, offset in enumerate(offsets):
+            try_x_base = goal_x_base + perp_x * offset
+            try_y_base = goal_y_base + perp_y * offset
+            goal_x = x0 + math.cos(yaw0) * try_x_base - math.sin(yaw0) * try_y_base
+            goal_y = y0 + math.sin(yaw0) * try_x_base + math.cos(yaw0) * try_y_base
+            if attempt:
+                self._fall_console(
+                    "%s：中间点被挡，第 %d 次尝试（换一侧，横移 %.2f m）"
+                    % (label, attempt + 1, offset)
                 )
-                remaining = self.fall_extra_close_distance
-        if remaining is None:
-            remaining = self.fall_nav_standoff_distance - target
-            rospy.loginfo(
-                "%s：导航后量不到主人（多半已近到掉出画面），按 standoff−目标=%.2f m 补齐",
+                self.publish_fall_debug_markers(
+                    label,
+                    owner_base=(owner_x, owner_y),
+                    samples_base=snapshot.get("points_xy"),
+                    body_base=snapshot.get("body_xy"),
+                    axis_base=axis_marker,
+                    obb_base=goal_info.get("obb"),
+                    standoff_base=(try_x_base, try_y_base),
+                    owner_map=(owner_map_x, owner_map_y),
+                    goal_map=(goal_x, goal_y),
+                    pose_map=(x0, y0, yaw0),
+                    owner_distance=distance,
+                    standoff_distance=standoff,
+                    note="stage %.2fm shift %+.2f" % (standoff, offset),
+                )
+            plan_ok, plan_reason = self.fall_nav_plan_ok((x0, y0), (goal_x, goal_y))
+            if not plan_ok and self.fall_nav_plan_block:
+                rospy.logwarn("%s：路径预检没过（%s）", label, plan_reason)
+                self._fall_console("%s：路径预检没过（%s）" % (label, plan_reason))
+                reason = "路径预检没过"
+                continue
+            if not plan_ok:
+                # 现场要求：有障碍就交给 move_base 自己绕（预检只是提示，不是门槛）
+                rospy.loginfo("%s：路径预检没过（%s），仍交给 move_base 尝试", label, plan_reason)
+                self._fall_console("%s：预检没过（%s）但按现场要求仍交给 move_base 尝试" % (label, plan_reason))
+            self._fall_console(
+                "%s：中间点 map=(%.2f, %.2f)（%s）" % (label, goal_x, goal_y, plan_reason)
+            )
+            goal = MoveBaseGoal()
+            goal.target_pose.header.frame_id = self.fall_nav_frame
+            goal.target_pose.header.stamp = rospy.Time.now()
+            goal.target_pose.pose.position.x = goal_x
+            goal.target_pose.pose.position.y = goal_y
+            goal.target_pose.pose.position.z = 0.0
+            goal.target_pose.pose.orientation.z = math.sin(goal_yaw / 2.0)
+            goal.target_pose.pose.orientation.w = math.cos(goal_yaw / 2.0)
+            ok, reason = self.navigate_fall_goal_with_guard(
+                goal, self.fall_nav_timeout, label, owner_bbox=snapshot.get("bbox")
+            )
+            self._fall_console(
+                "%s：move_base 结果 ok=%s（%s）" % (label, ok, reason or "到达")
+            )
+            if ok:
+                break
+            # 只有"换个位置有望解决"的失败才换一侧重试：
+            #   有障碍  → 这一侧被挡；
+            #   卡住    → 规划器进不去/出不来（看护循环新加的判据，2026-10-16）；
+            #   还差    → move_base 假成功，换个落点再试。
+            # 超时、ROS 关闭这类换哪一侧都一样，直接退下一级。
+            if not any(key in str(reason) for key in ("有障碍", "卡住", "还差")):
+                break
+        if not ok:
+            rospy.logwarn("%s：move_base 没走到中间点（%s），退回下一级", label, reason)
+            return False
+        rospy.loginfo("%s：已到中间点（≈%.2f m），开始直行闭环", label, standoff)
+        return self.fall_finish_approach(snapshot.get("bbox"), label)
+
+    # ------------------------------------------------------------------
+    # 挥手求助靠近：B-2 式（导航段走代价地图 + 收尾段带雷达护栏）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _approach_console(message):
+        """挥手靠近的"终端可见"日志（print 到 stdout）。
+
+        动作识别一触发，任务节点的 rosout/日志文件就会失灵（2026-10-11、10-16
+        两次现场都遇到），关键步骤只有 stdout 一定看得见。
+        """
+        try:
+            print("[挥手靠近] %s" % message, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def approach_owner_navigate(self, owner_name="", initial_bbox=None):
+        """挥手求助的"走近"：先 move_base 走到主人前方 standoff 点，再点云闭环收尾。
+
+        为什么改成这样（2026-10-16 现场）：
+          老的 approach_owner 是"相机闭环 + 直接发 /cmd_vel"—— 既不查 /scan，
+          也不经过 move_base/代价地图。它的控制目标是"人到镜头的距离"，
+          所以主人站在椅子后面挥手时，机器人盯着 1.0 m 这个数一路推过去，
+          中间那把椅子腿在控制环里根本不存在，于是撞上去。
+          （`fall_scan_guard_distance` 那个"硬护栏"只接在摔倒靠近的三个函数里，
+           对挥手靠近是死代码；而且窗口只有正前 ±25°、阈值还是从雷达中心算的。）
+
+        现在这条路和摔倒靠近一样：
+          ① 点云快照出主人在机器人系的位置（躯干锚点 + 地面剔除）；
+          ② 在"主人→机器人"连线上退 standoff（默认 approach_standoff_distance
+             = 1.0 m）得到中间点，换算到 map 系交给 move_base —— **走代价地图**，
+             椅子腿、桌腿这些障碍由全局/局部规划器绕开；
+          ③ 导航途中双保险：move_base 自己的避障 + `/scan` 硬护栏
+             （含"挡在前面的到底是不是主人"的判别，见 guard_obstacle_is_owner）；
+          ④ 到中间点后，最后一段用点云闭环 `drive_forward_until_cloud_close`
+             收到 approach_standoff_distance，这一段同样带 /scan 护栏。
+
+        返回 True=已经站到主人前方合适距离；False=没走通（调用方按
+        ~approach_nav_fallback_camera 决定是原地不动还是退回老办法）。
+        """
+        if not self.approach_enabled:
+            rospy.loginfo("走近主人已关闭（approach_enabled=false）")
+            return False
+        if not self.approach_navigate_enabled:
+            return False
+
+        target = float(self.approach_standoff_distance)
+        label = "%s（挥手·导航靠近）" % (owner_name or "主人")
+        stage = float(self.approach_nav_stage_standoff_distance)
+        standoff = target if stage <= 0.0 else max(0.50, stage)
+        self._approach_console("%s：开始（目标 %.2f m，中间点 %.2f m）" % (label, target, standoff))
+
+        if not self.ensure_approach_pointcloud():
+            rospy.logwarn("%s：点云不可用，不走导航方式", label)
+            self._approach_console("%s：点云不可用 → 不走导航方式" % label)
+            return False
+        self.ensure_scan_subscription()
+        band = (self.approach_owner_band_low, self.approach_owner_band_high)
+        snapshot = self.capture_fallen_owner_snapshot(
+            initial_bbox, label=label, band=band, floor_filter=True
+        )
+        if snapshot is None:
+            rospy.logwarn("%s：拿不到主人的点云位置，不走导航方式", label)
+            self._approach_console("%s：快照失败 → 不走导航方式" % label)
+            return False
+        # "我这就过来"整次靠近只播一次（与摔倒靠近共用同一个标志位）
+        self.fall_speak_approach_start_once()
+        distance = float(snapshot["distance"])
+        rospy.loginfo(
+            "%s：快照 前=%.2f m 侧=%.2f m 距离=%.2f m bearing=%.3f rad"
+            "（样本 %d 次 / %d 点）",
+            label,
+            snapshot["forward"],
+            snapshot["lateral"],
+            distance,
+            float(snapshot.get("bearing") or 0.0),
+            snapshot["samples"],
+            snapshot["points"],
+        )
+        self._approach_console(
+            "%s：快照 前=%.2f 侧=%.2f 距离=%.2f bearing=%.3f（%d 点）"
+            % (
                 label,
-                remaining,
+                snapshot["forward"],
+                snapshot["lateral"],
+                distance,
+                float(snapshot.get("bearing") or 0.0),
+                int(snapshot.get("points") or 0),
             )
-        # 盲走上限：即使上面算出来的数很大，也只允许补这么多（0.40 m）
-        remaining = max(0.0, min(self.fall_extra_close_max_distance, remaining))
-        if remaining > self.fall_creep_finish_tolerance:
-            done, travelled = self.creep_forward_by_odometry(
-                remaining,
-                label=label,
-                scan_stop_distance=self.fall_extra_close_scan_stop_distance,
-            )
+        )
+
+        # 可选：先原地"裸转正"。默认关 —— 裸转没有护栏（rotate_toward_bearing 只看
+        # 里程计），交给 move_base 去转到目标朝向更安全；face-first 只作为现场可选。
+        bearing = float(snapshot.get("bearing") or 0.0)
+        if self.approach_face_first_enabled and abs(bearing) > self.approach_face_first_max_angle:
+            self._approach_console("%s：按现场开关做转正（bearing=%.3f rad）" % (label, bearing))
+            self.rotate_toward_bearing(bearing, label=label)
+
+        owner_x = float(snapshot["forward"]) + self.approach_camera_forward_offset
+        owner_y = float(snapshot["lateral"])
+        # 站姿主人不传 body_xy：身体主方向是给"躺着的人"用的，站姿下它没有意义，
+        # 传 None 就是沿视线退 standoff（正对主人停下）。
+        goal_x_base, goal_y_base, face_yaw_rel, goal_info = self.fall_standoff_goal_base(
+            owner_x, owner_y, standoff, body_xy=None, label=label
+        )
+
+        # 已经站在中间点附近：不导航，直接进"点云闭环收尾"
+        if distance - standoff <= self.fall_nav_distance_tolerance:
             rospy.loginfo(
-                "%s：补齐 %.2f m / %.2f m 完成=%s（雷达软停车线 %.2f m）",
+                "%s：已在中间点附近（%.2f m ≤ %.2f + %.2f），跳过导航直接收尾",
                 label,
-                travelled,
-                remaining,
-                done,
-                self.fall_extra_close_scan_stop_distance,
+                distance,
+                standoff,
+                self.fall_nav_distance_tolerance,
             )
-        else:
-            rospy.loginfo("%s：已到位（还差 %.2f m，在容差内）", label, remaining)
-        self._fall_console("%s：B-2 完成（导航+补齐都走通）" % label)
-        return True
+            self._approach_console("%s：已在中间点附近（%.2f m），跳过导航" % (label, distance))
+            return self.approach_finish_by_cloud(snapshot.get("bbox"), label)
+
+        pose = self.robot_pose_in_map()
+        if pose[0] is None:
+            rospy.logwarn("%s：拿不到 map 系位姿（TF 不通），不走导航方式", label)
+            self._approach_console("%s：拿不到 map 位姿（TF 不通）" % label)
+            return False
+        x0, y0, yaw0, age = pose
+        goal_x = x0 + math.cos(yaw0) * goal_x_base - math.sin(yaw0) * goal_y_base
+        goal_y = y0 + math.sin(yaw0) * goal_x_base + math.cos(yaw0) * goal_y_base
+        goal_yaw = self.wrap_angle(yaw0 + float(face_yaw_rel))
+        owner_map_x = x0 + math.cos(yaw0) * owner_x - math.sin(yaw0) * owner_y
+        owner_map_y = y0 + math.sin(yaw0) * owner_x + math.cos(yaw0) * owner_y
+        rospy.loginfo(
+            "%s：主人 map≈(%.2f, %.2f)，中间点 map=(%.2f, %.2f) yaw=%.2f；"
+            "机器人 map=(%.2f, %.2f) yaw=%.2f（位姿 age=%.1fs）",
+            label,
+            owner_map_x,
+            owner_map_y,
+            goal_x,
+            goal_y,
+            goal_yaw,
+            x0,
+            y0,
+            yaw0,
+            age if age is not None else -1.0,
+        )
+        self._approach_console(
+            "%s：主人 map≈(%.2f, %.2f) 中间点 map=(%.2f, %.2f)"
+            % (label, owner_map_x, owner_map_y, goal_x, goal_y)
+        )
+        # 调试可视化（只画图，不影响决策）：红=主人估计点、绿=中间点、蓝=机器人
+        self.publish_fall_debug_markers(
+            label,
+            owner_base=(owner_x, owner_y),
+            samples_base=snapshot.get("points_xy"),
+            body_base=snapshot.get("body_xy"),
+            standoff_base=(goal_x_base, goal_y_base),
+            owner_map=(owner_map_x, owner_map_y),
+            goal_map=(goal_x, goal_y),
+            pose_map=(x0, y0, yaw0),
+            owner_distance=distance,
+            standoff_distance=standoff,
+            note="approach standoff %.2fm" % standoff,
+        )
+
+        # ---- 中间点：正中一个候选 + 被挡时"换一侧"的候选 ----
+        vector_x = goal_x_base - owner_x
+        vector_y = goal_y_base - owner_y
+        norm = max(1e-6, math.hypot(vector_x, vector_y))
+        perp_x, perp_y = -vector_y / norm, vector_x / norm
+        offsets = [0.0]
+        for index in range(self.approach_nav_obstacle_retries):
+            magnitude = self.approach_nav_obstacle_shift * (index + 1)
+            offsets.extend([magnitude, -magnitude])
+
+        ok = False
+        reason = "未尝试"
+        for attempt, offset in enumerate(offsets):
+            try_x_base = goal_x_base + perp_x * offset
+            try_y_base = goal_y_base + perp_y * offset
+            goal_x = x0 + math.cos(yaw0) * try_x_base - math.sin(yaw0) * try_y_base
+            goal_y = y0 + math.sin(yaw0) * try_x_base + math.cos(yaw0) * try_y_base
+            if attempt:
+                self._approach_console(
+                    "%s：中间点被挡，第 %d 次尝试（换一侧，横移 %.2f m）"
+                    % (label, attempt + 1, offset)
+                )
+            plan_ok, plan_reason = self.fall_nav_plan_ok((x0, y0), (goal_x, goal_y))
+            if not plan_ok and self.fall_nav_plan_block:
+                rospy.logwarn("%s：路径预检没过（%s）", label, plan_reason)
+                self._approach_console("%s：路径预检没过（%s）" % (label, plan_reason))
+                reason = "路径预检没过"
+                continue
+            if not plan_ok:
+                rospy.loginfo("%s：路径预检没过（%s），仍交给 move_base 尝试", label, plan_reason)
+            self._approach_console(
+                "%s：中间点 map=(%.2f, %.2f)（%s）" % (label, goal_x, goal_y, plan_reason)
+            )
+            goal = MoveBaseGoal()
+            goal.target_pose.header.frame_id = self.fall_nav_frame
+            goal.target_pose.header.stamp = rospy.Time.now()
+            goal.target_pose.pose.position.x = goal_x
+            goal.target_pose.pose.position.y = goal_y
+            goal.target_pose.pose.position.z = 0.0
+            goal.target_pose.pose.orientation.z = math.sin(goal_yaw / 2.0)
+            goal.target_pose.pose.orientation.w = math.cos(goal_yaw / 2.0)
+            ok, reason = self.navigate_fall_goal_with_guard(
+                goal, self.approach_nav_timeout, label, owner_bbox=snapshot.get("bbox")
+            )
+            self._approach_console("%s：move_base 结果 ok=%s（%s）" % (label, ok, reason or "到达"))
+            if ok:
+                break
+            # 只有"换一侧有望解决"的失败才重试：有障碍 / 卡住 / 还差
+            if not any(key in str(reason) for key in ("有障碍", "卡住", "还差")):
+                break
+        if not ok:
+            rospy.logwarn("%s：move_base 没走到中间点（%s）", label, reason)
+            self._approach_console("%s：move_base 没走到中间点（%s）" % (label, reason))
+            return False
+        rospy.loginfo("%s：已到中间点（≈%.2f m），开始点云闭环收尾", label, standoff)
+        self._approach_console("%s：已到中间点（≈%.2f m），开始收尾" % (label, standoff))
+        return self.approach_finish_by_cloud(snapshot.get("bbox"), label)
+
+    def approach_finish_by_cloud(self, bbox, label):
+        """导航段之后的收尾：用**点云闭环**收到 approach_standoff_distance。
+
+        2026-10-16 现场要求：**挥手靠近要减少最后的"盲靠"**（纯里程计往前贴）。
+        原因：站姿主人 1 m 内点云照样量得到，根本没有"非得盲走"的理由；而盲走
+        没有任何相机/点云确认，只有正前方 ±25°、0.40 m 的雷达护栏，正是撞椅子腿
+        那一类风险。所以这里改成：
+
+          · 先跑点云闭环（`drive_forward_until_cloud_close`，带 /scan 护栏）；
+          · 还差一点就**再用闭环补**（`~approach_finish_retries`，默认 1 次），
+            而不是盲走；
+          · 只有显式打开 `~approach_creep_max_distance`(默认 0 = 关) 时才允许
+            里程计补齐，而且照样带 /scan 护栏。
+
+        返回 True=已确认站到 standoff 附近；False=没确认（调用方直接进入问答，
+        不再前进）。
+        """
+        target = float(self.approach_standoff_distance)
+        tolerance = max(0.05, float(self.fall_nav_distance_tolerance))
+        attempts = 1 + max(0, int(self.approach_finish_retries))
+        measured = None
+        reason = "未尝试"
+        for attempt in range(attempts):
+            measured, reason = self.drive_forward_until_cloud_close(
+                bbox, label=label, stop_distance=target
+            )
+            self._approach_console(
+                "%s：收尾第 %d/%d 次闭环结束（%s，点云距离=%s，目标 %.2f m）"
+                % (
+                    label,
+                    attempt + 1,
+                    attempts,
+                    reason,
+                    "无" if measured is None else "%.2f m" % float(measured),
+                    target,
+                )
+            )
+            if reason == "scan_guard":
+                # 护栏就是"前面有东西挡着"：不再前进，也不盲开
+                rospy.logwarn("%s：前方有障碍（护栏触发），停在原地不再靠近", label)
+                return False
+            if measured is None:
+                # 量不到人（多半已经太近/出画面）：再往前就是盲开，停
+                rospy.loginfo("%s：收尾时量不到人，停在这个位置（不盲走）", label)
+                break
+            if float(measured) <= target + tolerance:
+                break
+            if attempt + 1 < attempts:
+                rospy.loginfo(
+                    "%s：还差 %.2f m（点云 %.2f m > 目标 %.2f m + 容差 %.2f），"
+                    "用点云闭环再补一次（不盲走）",
+                    label,
+                    float(measured) - target,
+                    float(measured),
+                    target,
+                    tolerance,
+                )
+        arrived = measured is not None and float(measured) <= target + tolerance
+        # 可选：显式打开才做里程计补齐（默认关）。留这个口子是为了极端场景下手动兜底。
+        if (
+            not arrived
+            and measured is not None
+            and self.approach_creep_max_distance > 0.0
+        ):
+            remaining = max(0.0, float(measured) - target)
+            remaining = min(self.approach_creep_max_distance, remaining)
+            if remaining > 0.15:
+                done, travelled = self.creep_forward_by_odometry(
+                    remaining,
+                    label=label,
+                    scan_stop_distance=self.fall_scan_guard_distance,
+                )
+                rospy.loginfo(
+                    "%s：按开关做里程计补齐 %.2f m / %.2f m 完成=%s（雷达护栏 %.2f m）",
+                    label,
+                    travelled,
+                    remaining,
+                    done,
+                    self.fall_scan_guard_distance,
+                )
+                self._approach_console(
+                    "%s：里程计补齐 %.2f m / %.2f m 完成=%s" % (label, travelled, remaining, done)
+                )
+        if not arrived:
+            rospy.logwarn(
+                "%s：没能确认走到 %.2f m（点云最后 %s，%s）→ 不再前进",
+                label,
+                target,
+                "无" if measured is None else "%.2f m" % float(measured),
+                reason,
+            )
+        return bool(arrived)
 
     def take_pending_answer(self):
         """取走并清空当前待处理的 ASR 文本（没有就返回空串）。"""
@@ -3773,6 +5083,11 @@ class AllOwnersTask(FaceBodyEnrollTest):
     def ask_switch_instruction(self, owner_name=""):
         """问主人要不要操作电器开关，听懂"要开 / 要关 / 不用"。返回意图名或 None。
 
+        ⚠️ 2026-10-16 现场已**停用**：坐姿/躺着的 next_step 改成 "next_waypoint"，
+        分派器不再调用本函数（也不再有"等主人回答"那一段）。
+        实现原样保留，想恢复就把 feedback_after_recognition.ACTION_NEXT_STEP
+        里 sitting/lying 改回 "ask_switch"。
+
         只问一轮：识别不到就明说没听清，不硬猜 —— 猜错了播报的内容就是错的，
         而这条的得分依据恰恰是播报内容。
         """
@@ -3853,14 +5168,116 @@ class AllOwnersTask(FaceBodyEnrollTest):
     # 还没做的：电器开关里"开关标记视觉检测 + 机械臂对位"那半 —— 硬件暂时不支持，
     #           所以 operate_switch 现在只播报状态，不发任何机械臂指令。
     #           check_hardware（开机硬件自检）仍是占位。
-    def check_hardware(self):
-        """【预留】开机硬件自检（话题/串口/Kinect 是否就绪）。
+    def is_topic_advertised(self, topic_name):
+        """话题有没有发布者。查询失败返回 None（不把自检卡死）。"""
+        try:
+            published_topics = rospy.get_published_topics("/")
+        except Exception as exc:  # noqa: BLE001
+            rospy.logwarn("查询话题列表失败（自检降级为只看有没有数据）：%s", exc)
+            return None
+        normalized = str(topic_name).rstrip("/") or "/"
+        for name, _topic_type in published_topics or []:
+            if (str(name).rstrip("/") or "/") == normalized:
+                return True
+        return False
 
-        参考 task1_find_owner_real.py 的 wait_for_hardware_inputs()。
-        返回 True 表示可以开始任务。
+    def describe_missing_topic(self, topic_name, label):
+        """把"缺哪一路数据"说成人话，直接给出下一步该跑什么命令。"""
+        advertised = self.is_topic_advertised(topic_name)
+        if advertised is True:
+            return (
+                "%s（%s）：有发布者但没有数据 → 跑 `rostopic hz %s` 确认，"
+                "驱动起来了但没出数据（USB 掉了 / 设备被占用）"
+                % (label, topic_name, topic_name)
+            )
+        if advertised is False:
+            return (
+                "%s（%s）：连发布者都没有 → 起栈缺了对应驱动"
+                % (label, topic_name)
+            )
+        return "%s（%s）：没有收到数据" % (label, topic_name)
+
+    def check_hardware(self):
+        """开机硬件自检：等 /scan 和 /odom 真的出数据，缺哪个就报出来并停车。
+
+        2026-10-16 加，移植自 server_robot3 的 wait_for_hardware_inputs()。
+        返回 True=可以开始任务；False=硬件没就绪，调用方必须直接结束（不要开车）。
+
+        相机不在这里等：本包的 wait_for_camera_inputs() 已经单独把关（它还会
+        提示看门狗的自愈进度），这里只补上以前完全没人管的 /scan 和 /odom。
         """
-        rospy.loginfo("硬件自检：预留接口，暂未实现（默认视为通过）")
-        return True
+        if not self.require_scan and not self.require_odom:
+            rospy.loginfo(
+                "硬件自检跳过（_require_scan=false _require_odom=false）"
+            )
+            return True
+        if self.require_scan:
+            self.ensure_scan_subscription()
+
+        started = time.time()
+        deadline = started + self.hardware_check_timeout
+        last_report = 0.0
+        rate = rospy.Rate(10)
+        scan_ok = not self.require_scan
+        odom_ok = not self.require_odom
+        scan_age = None
+        odom_age = None
+        while not rospy.is_shutdown():
+            now = time.time()
+            with self.lock:
+                scan_stamp = float(getattr(self, "_scan_msg_stamp", 0.0) or 0.0)
+                odom_stamp = float(getattr(self, "latest_odom_stamp", 0.0) or 0.0)
+            scan_age = (now - scan_stamp) if scan_stamp > 0.0 else None
+            odom_age = (now - odom_stamp) if odom_stamp > 0.0 else None
+            scan_ok = (not self.require_scan) or (
+                scan_age is not None and scan_age <= 2.0
+            )
+            odom_ok = (not self.require_odom) or (
+                odom_age is not None and odom_age <= 2.0
+            )
+            if scan_ok and odom_ok:
+                rospy.loginfo(
+                    "硬件自检通过：%s age=%s，%s age=%s（%.1f 秒）",
+                    self.scan_topic,
+                    "未要求" if scan_age is None else "%.2fs" % scan_age,
+                    self.odom_topic,
+                    "未要求" if odom_age is None else "%.2fs" % odom_age,
+                    now - started,
+                )
+                return True
+            if now >= deadline:
+                break
+            if now - last_report >= 5.0:
+                last_report = now
+                rospy.logwarn(
+                    "等待硬件数据：%s %s / %s %s（已等 %.0f / %.0f 秒）",
+                    self.scan_topic,
+                    "有" if scan_ok else "无",
+                    self.odom_topic,
+                    "有" if odom_ok else "无",
+                    now - started,
+                    self.hardware_check_timeout,
+                )
+            rate.sleep()
+
+        missing = []
+        if not scan_ok:
+            missing.append(self.describe_missing_topic(self.scan_topic, "雷达"))
+        if not odom_ok:
+            missing.append(self.describe_missing_topic(self.odom_topic, "底盘里程计"))
+        rospy.logerr(
+            "硬件自检没通过，任务不启动（避免盲开）：%s",
+            "；".join(missing) or "未知",
+        )
+        rospy.logerr(
+            "排查顺序：① 起栈是否完整；② `rostopic hz %s` 和 `rostopic hz %s`；"
+            "③ 雷达 USB（`ls -l /dev/rplidar`）和底盘串口（`ls -l /dev/ftdi`）；"
+            "④ 确实要先跳过自检时加参数 `_require_scan:=false _require_odom:=false`",
+            self.scan_topic,
+            self.odom_topic,
+        )
+        self.stop_base()
+        return False
 
     def perform_fall_assist(self, owner_name="", action=""):
         """摔倒协助：把机械臂伸到人上方，保持几秒，再收回。
@@ -3968,6 +5385,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
             return None
         self.log_time_budget("准备返回出口")
         self.speak("任务完成，正在返回出口。", wait=True)
+        # 回出口是"新目标"，重新计数：别让前面房间的失败把最后这段也掐掉
+        self.reset_room_navigation_failures(self.exit_waypoint_name)
         arrived = self.navigate_to_waypoint(self.exit_waypoint_name)
         if arrived:
             rospy.loginfo("已返回出口航点 %s", self.exit_waypoint_name)
@@ -4008,8 +5427,17 @@ class AllOwnersTask(FaceBodyEnrollTest):
         以后新增能力：在这里加一个分支 + 实现对应方法即可。
         """
         rospy.loginfo("下一步动作：%s（主人=%s 动作=%s）", next_step, owner_name, action)
+        if next_step == "next_waypoint":
+            # 2026-10-16 现场要求：坐姿 / 躺在床上，播报完"动作+位置"就**直接继续**，
+            # 不追问"要不要操作电器开关"、也不等主人回答（原来这一步要停 8~15 秒）。
+            rospy.loginfo(
+                "按现场要求：坐姿/躺着不追问电器开关，直接继续下一个航点"
+            )
+            return None
         if next_step == "approach_and_assist":
             # 摔倒协助：走近 → 伸机械臂 → 收回。
+            # 整次靠近只播一次"我这就过来"（B-2/B-1/相机闭环三级回退不再各播一遍）
+            self._fall_approach_announced = False
             # 现在敢对躺着的人调用 approach_owner 了，因为距离是**点云量出来的**：
             # 躺姿的人体框又宽又矮，"框高占比"那条路会以为还很远、一路开到人身上；
             # 点云量的是人到相机的真实深度，跟姿势无关。
@@ -4028,18 +5456,46 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     rospy.logwarn("摔倒靠近（快照式）未完成，退回相机闭环")
                     mode = "camera"
             if mode == "camera":
-                self.approach_owner(
-                    owner_name,
-                    standoff_distance=self.fall_approach_standoff_distance,
-                    min_distance=self.fall_approach_min_distance,
-                    initial_bbox=owner_bbox,
-                    lost_seconds=self.fall_approach_lost_seconds,
-                    identity_gate=False,
-                )
+                if not getattr(self, "fall_camera_fallback_enabled", False):
+                    # 2026-10-12 实地要求：导航段没能把机器人带到中间点（例如周围全是
+                    # 障碍物、真走不过去）就**别再折腾**——原地停稳，直接做伸臂动作。
+                    rospy.logwarn(
+                        "摔倒靠近：导航/快照式都没走通，按要求不再退相机闭环，"
+                        "原地停下直接伸臂协助"
+                    )
+                    self._fall_console("无法再靠近（导航走不过去）→ 原地停下，直接伸臂")
+                    self.stop_base()
+                else:
+                    self.approach_owner(
+                        owner_name,
+                        standoff_distance=self.fall_approach_standoff_distance,
+                        min_distance=self.fall_approach_min_distance,
+                        initial_bbox=owner_bbox,
+                        lost_seconds=self.fall_approach_lost_seconds,
+                        identity_gate=False,
+                    )
             return self.perform_fall_assist(owner_name, action)
         if next_step == "approach_and_ask_help":
             # 挥手求助：走近 → 问需要什么帮助 → 把主人的原话复述回去
-            self.approach_owner(owner_name)
+            # 走近从 2026-10-16 起走"导航式"：先 move_base（走代价地图，绕开椅子腿等
+            # 障碍；导航段带 /scan 硬护栏），最后一段用点云闭环 + /scan 护栏收尾。
+            # 走不通时默认**原地不动**直接问答，不退回那条没有护栏的相机闭环
+            # （现场就是在那条路上撞的椅子腿）。想退回老行为：_approach_navigate_fallback_camera:=true
+            self._fall_approach_announced = False
+            if not self.approach_enabled:
+                rospy.loginfo("走近主人已关闭（approach_enabled=false），原地直接进入问答")
+            elif self.approach_owner_navigate(owner_name, owner_bbox):
+                self._approach_console("挥手靠近：已站到主人前方合适距离")
+            elif self.approach_navigate_fallback_camera:
+                rospy.logwarn("挥手靠近：导航方式没走通，按开关退回相机闭环（**无雷达护栏**）")
+                self._approach_console("挥手靠近：导航没走通 → 退回相机闭环（无护栏）")
+                self.approach_owner(owner_name, initial_bbox=owner_bbox)
+            else:
+                rospy.logwarn(
+                    "挥手靠近：没能确认走到 standoff，不再前进、直接进入问答"
+                    "（避免撞到周围家具/椅子腿）"
+                )
+                self._approach_console("挥手靠近：没走到位 → 不再前进，直接问答")
             return self.ask_owner_help(owner_name)
         if next_step == "ask_switch":
             # 问 → 听懂要开还是要关 → 把开关状态播报出来（机械臂那半还没接）
@@ -4245,15 +5701,30 @@ class AllOwnersTask(FaceBodyEnrollTest):
         # 进房间开始转之前先确认相机活着：掉流时转一圈是纯浪费（识别全空），
         # 而且日志会显得像"这间房没人"。看门狗的恢复梯子会在这段时间里把画面救回来。
         self.hold_until_camera_recovers("进房间找人")
+        found_before_scan = len(checked)
+
+        def handle_match(result):
+            """就地处理一位主人；按赛制"每间至多一位"立刻结束这一圈。"""
+            # handle_owner_inline 是**阻塞**的：居中 → 报姓名 → 动作识别 → 播报
+            # → 分派交互（走近 / 伸臂协助 / 问需要什么帮助），全部做完才返回。
+            # 所以下面这两句一定发生在"动作识别和交互都结束之后"。
+            wrap_up = self.handle_owner_inline(result, remaining, checked)
+            if self.one_owner_per_room:
+                rospy.loginfo(
+                    "本间已找到 1 位主人（赛制：每间至多一位）→ 结束本间扫描，去下一个航点"
+                )
+                return True   # 真值 = 请 scan_for_owner_for_target 立刻收圈
+            return bool(wrap_up)
+
         self.scan_for_owner_for_target(
             allowed_owner_indices=set(remaining),
             not_found_text="",       # 话术由总任务统一组织
             followup=False,          # 居中/播报/动作由 handle_owner_inline 做
-            on_match=lambda result: self.handle_owner_inline(
-                result, remaining, checked
-            ),
+            on_match=handle_match,
         )
-        if remaining:
+        if self.one_owner_per_room and len(checked) > found_before_scan:
+            pass   # 已经在 handle_match 里打过日志了
+        elif remaining:
             rospy.loginfo(
                 "这一间转完了，还剩 %d 位没找到（%s）",
                 len(remaining),
@@ -4273,6 +5744,12 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 continue
             remaining.remove(owner_index)
             checked.append(record)
+            if self.one_owner_per_room:
+                # 赛制：每个房间至多一位主人 → 认到一位就结束这里
+                rospy.loginfo(
+                    "本处已找到 1 位主人（赛制：每间至多一位）→ 结束此处，去下一个航点"
+                )
+                break
         return checked
 
     def run_waypoint_search_round(self, any_order=True):
@@ -4289,6 +5766,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
         }
         remaining = [profile["index"] for profile in self.owner_profiles]
         checked = []
+        # 每个房间"这一间找到了几位主人"（备用航点的跳过判断要用）
+        room_found = {}
 
         for position_index, position in enumerate(self.search_positions()):
             if not remaining or rospy.is_shutdown():
@@ -4300,6 +5779,33 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     "、".join(names[i] for i in remaining),
                 )
                 break
+            # ★ 备用航点判断（放在最前面：要跳过的房间不参与时间/预算计算）
+            fallback_anchor = self.fallback_waypoint_anchors.get(str(position or ""))
+            if fallback_anchor:
+                found_at_anchor = room_found.get(fallback_anchor)
+                if found_at_anchor is None:
+                    rospy.logwarn(
+                        "备用航点 %s：主航点 %s 这一轮还没扫过，还是去 %s 看一眼",
+                        position,
+                        fallback_anchor,
+                        position,
+                    )
+                elif found_at_anchor > 0:
+                    rospy.loginfo(
+                        "在 %s 找到了 %d 位主人 → 跳过备用航点 %s（%s）",
+                        fallback_anchor,
+                        found_at_anchor,
+                        position,
+                        self.waypoint_speech_name(position),
+                    )
+                    continue
+                else:
+                    rospy.loginfo(
+                        "在 %s 一位都没找到 → 去备用航点 %s（%s）",
+                        fallback_anchor,
+                        position,
+                        self.waypoint_speech_name(position),
+                    )
             if position:
                 # 出发前先算一笔账：走一趟 + 到了再转一圈，至少要这么多秒。
                 # 不够就别去 —— 去了也扫不了，只会白跑一趟、还挤掉回出口的时间。
@@ -4323,8 +5829,13 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     position,
                     self.waypoint_speech_name(position),
                 )
+                # 每个新房间重新开始计"连续失败"：这一间失败到上限只放弃这一间，
+                # 下一间照常导航（2026-10-16 现场要求）。
+                self.reset_room_navigation_failures(position)
                 self.announce_and_navigate_to(position)
                 self.log_time_budget("到达 %s" % position)
+            # 记住"当前在哪个房间"：动作播报要用（主人张三正在客厅坐着）
+            self.current_room_waypoint = str(position or "")
             # 一间房至少要留 ~min_room_scan_seconds 秒才值得进去扫：
             # 一圈约 40 秒，剩下的时间连一圈都转不完，进去就是白转，
             # 不如把时间留给"走回出口"。
@@ -4340,6 +5851,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
             # 扫描里就地处理主人花掉的时间会被自动补回（见 on_match 处理）。
             saved_scan_timeout = self.scan_timeout
             self.scan_timeout = budget
+            # 这一间扫完能新增几位主人？（备用航点靠这个数字决定去不去）
+            found_before = len(checked)
             try:
                 if any_order:
                     self.scan_room_in_one_round(remaining, names, checked)
@@ -4351,6 +5864,15 @@ class AllOwnersTask(FaceBodyEnrollTest):
                     )
             finally:
                 self.scan_timeout = saved_scan_timeout
+            room_found[str(position or "")] = len(checked) - found_before
+            rospy.loginfo(
+                "本间小结：%s（%s）找到 %d 位；累计 %d 位，还剩 %s",
+                position or "原地",
+                self.waypoint_speech_name(position) if position else "原地",
+                room_found[str(position or "")],
+                len(checked),
+                "、".join(names[i] for i in remaining) or "（无）",
+            )
 
             # 这个房间的流程走完了：看一眼顺手累积的垃圾候选，有就播报。
             # 播报是零额外耗时的 —— 累积是在 detections_callback 里做的，
@@ -4387,7 +5909,8 @@ class AllOwnersTask(FaceBodyEnrollTest):
         if self.navigate_enabled:
             rospy.loginfo(
                 "导航已启用：房间顺序=%s，回出口航点=%s，单航点超时=%.0fs，"
-                "连续失败 %d 次后放弃导航",
+                "同一目标（每间房/起点/回出口）连续失败 %d 次就只放弃该目标，"
+                "下一间重新计数继续导航",
                 "、".join(
                     "%s(%s)" % (name, self.waypoint_speech_name(name))
                     for name in self.search_waypoints
@@ -4398,7 +5921,12 @@ class AllOwnersTask(FaceBodyEnrollTest):
                 self.navigation_failure_limit,
             )
         # ---- 第 0 步：等输入就绪、把模型加载好 ----
-        self.check_hardware()
+        if not self.check_hardware():
+            rospy.logerr(
+                "硬件没就绪：本次任务直接结束（不导航、不开车）。"
+                "修好硬件后重新运行即可。"
+            )
+            return
         self.wait_for_tts()
         if not self.wait_for_asr():
             return
@@ -4412,6 +5940,33 @@ class AllOwnersTask(FaceBodyEnrollTest):
         self.init_pose_helper()
         # 注册这两分钟完全不需要看垃圾，把垃圾检测节点先按住（省 CPU 给注册用）
         self.set_trash_detector_paused(True, "注册阶段不需要看垃圾")
+
+        # ---- 第 0.5 步：先去指定航点（例如客厅），在那里注册（2026-10-15 新流程）----
+        # 现场赛程是"机器人从门口进客厅 → 在客厅注册主人 → 再逐房间找人"。
+        # ~start_waypoint 为空 = 保持老流程（在起点原地注册）。
+        # 出发前先把 AMCL 的初始位姿设好（替代每次手点 2D Pose Estimate）
+        if self.auto_initial_pose:
+            self.publish_auto_initial_pose()
+        else:
+            # 关掉自动初值 = 完全靠人在 RViz 里点。开局把当前位姿打进日志，
+            # 点没点 / 点歪了，一眼能看出来（否则就是一串 Failed to get a plan.）。
+            self.report_manual_initial_pose()
+        if self.start_waypoint:
+            speech_name = self.waypoint_speech_name(self.start_waypoint)
+            self.speak(
+                self.start_waypoint_text % speech_name,
+                wait=True,
+            )
+            # 起点也是"新目标"：失败计数从 0 开始
+            self.reset_room_navigation_failures(self.start_waypoint)
+            arrived = self.navigate_to_waypoint(self.start_waypoint)
+            self.log_time_budget("到达注册点 %s" % self.start_waypoint)
+            if not arrived:
+                rospy.logwarn(
+                    "没能导航到注册点 %s，就地注册（后面流程照常）", self.start_waypoint
+                )
+            # 注册点的房间名先记下来：万一紧接着就在这里做动作播报，也能带上房间
+            self.current_room_waypoint = str(self.start_waypoint)
 
         # ---- 第 1 步：注册 ----
         if self.reuse_existing_profile and self.load_all_owner_profiles():
@@ -4428,6 +5983,20 @@ class AllOwnersTask(FaceBodyEnrollTest):
             ),
         )
         self.log_time_budget("注册完成")
+
+        # ---- 注册完成后：请志愿者就位，原地停 N 秒（不动），再开始寻找 ----
+        # 为什么要停：志愿者听到这句话才走到位/躺好，机器人立刻开找会白扫一圈。
+        # 期间**不发任何速度指令**（stop_base），只等时间。
+        if str(self.search_ready_text or "").strip():
+            self.speak(self.search_ready_text, wait=True)
+        if self.search_ready_pause > 0.0:
+            rospy.loginfo(
+                "请志愿者就位：原地停 %.1f 秒（不动）后再开始寻找",
+                self.search_ready_pause,
+            )
+            self.stop_base()
+            rospy.sleep(self.search_ready_pause)
+            self.log_time_budget("志愿者就位")
 
         # ---- 第 2 步：逐房间找、逐个检测 ----
         # 从现在开始相机要扫房间了，垃圾就在这时候看

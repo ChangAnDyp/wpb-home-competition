@@ -1,52 +1,62 @@
 <Waterplus>
     <Waypoint>
         <Name>living_room</Name>
-        <Pos_x>6.30826</Pos_x>
-        <Pos_y>2.24004</Pos_y>
-        <Pos_z>0</Pos_z>
-        <Ori_x>0</Ori_x>
-        <Ori_y>0</Ori_y>
-        <Ori_z>0.978678</Ori_z>
-        <Ori_w>0.205401</Ori_w>
+        <Pos_x>6.60796</Pos_x>
+        <Pos_y>2.96042</Pos_y>
+        <Pos_z>-1.86265e-09</Pos_z>
+        <Ori_x>8.57423e-10</Ori_x>
+        <Ori_y>7.69217e-09</Ori_y>
+        <Ori_z>0.945366</Ori_z>
+        <Ori_w>0.326011</Ori_w>
     </Waypoint>
     <Waypoint>
         <Name>kitchen</Name>
-        <Pos_x>8.14939</Pos_x>
-        <Pos_y>1.32838</Pos_y>
-        <Pos_z>0</Pos_z>
-        <Ori_x>0</Ori_x>
-        <Ori_y>0</Ori_y>
-        <Ori_z>-0.0938222</Ori_z>
-        <Ori_w>0.995589</Ori_w>
+        <Pos_x>0.590332</Pos_x>
+        <Pos_y>7.79026</Pos_y>
+        <Pos_z>-3.72535e-09</Pos_z>
+        <Ori_x>-5.5921e-08</Ori_x>
+        <Ori_y>5.29125e-09</Ori_y>
+        <Ori_z>0.893778</Ori_z>
+        <Ori_w>0.448511</Ori_w>
     </Waypoint>
     <Waypoint>
         <Name>bedroom</Name>
-        <Pos_x>4.04478</Pos_x>
-        <Pos_y>5.0217</Pos_y>
-        <Pos_z>0</Pos_z>
-        <Ori_x>0</Ori_x>
-        <Ori_y>0</Ori_y>
-        <Ori_z>0.996448</Ori_z>
-        <Ori_w>0.0842152</Ori_w>
+        <Pos_x>0.06062</Pos_x>
+        <Pos_y>1.05042</Pos_y>
+        <Pos_z>1.9744e-07</Pos_z>
+        <Ori_x>-5.00247e-09</Ori_x>
+        <Ori_y>-5.4585e-08</Ori_y>
+        <Ori_z>0.445956</Ori_z>
+        <Ori_w>-0.895055</Ori_w>
     </Waypoint>
     <Waypoint>
         <Name>canteen</Name>
-        <Pos_x>12.9332</Pos_x>
-        <Pos_y>6.53795</Pos_y>
-        <Pos_z>0</Pos_z>
-        <Ori_x>0</Ori_x>
-        <Ori_y>0</Ori_y>
-        <Ori_z>0.971223</Ori_z>
-        <Ori_w>-0.238174</Ori_w>
+        <Pos_x>-0.527691</Pos_x>
+        <Pos_y>4.80526</Pos_y>
+        <Pos_z>-7.26432e-08</Pos_z>
+        <Ori_x>3.03266e-09</Ori_x>
+        <Ori_y>-1.16407e-08</Ori_y>
+        <Ori_z>0.889873</Ori_z>
+        <Ori_w>-0.456209</Ori_w>
     </Waypoint>
     <Waypoint>
         <Name>exit</Name>
-        <Pos_x>12.1057</Pos_x>
-        <Pos_y>8.71569</Pos_y>
+        <Pos_x>-6.88145</Pos_x>
+        <Pos_y>5.50454</Pos_y>
+        <Pos_z>2.79397e-07</Pos_z>
+        <Ori_x>-3.97715e-08</Ori_x>
+        <Ori_y>-3.32606e-08</Ori_y>
+        <Ori_z>0.983086</Ori_z>
+        <Ori_w>-0.183145</Ori_w>
+    </Waypoint>
+    <Waypoint>
+        <Name>bedroom2</Name>
+        <Pos_x>-0.330052</Pos_x>
+        <Pos_y>-1.76295</Pos_y>
         <Pos_z>0</Pos_z>
-        <Ori_x>0</Ori_x>
-        <Ori_y>0</Ori_y>
-        <Ori_z>0.651533</Ori_z>
-        <Ori_w>0.758621</Ori_w>
+        <Ori_x>-5.33577e-08</Ori_x>
+        <Ori_y>2.67048e-08</Ori_y>
+        <Ori_z>0.879087</Ori_z>
+        <Ori_w>0.476662</Ori_w>
     </Waypoint>
 </Waterplus>

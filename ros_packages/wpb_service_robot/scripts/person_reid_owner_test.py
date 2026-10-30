@@ -148,12 +148,23 @@ class PersonReidOwnerTest:
         )
         self.lying_match_threshold = float(rospy.get_param("~lying_match_threshold", 0.60))
         self.lying_min_reid_score = float(rospy.get_param("~lying_min_reid_score", 0.50))
+        # 2026-10-17 现场要求：躺姿连续命中 3 → **2** 次。
+        # 依据：昨天两次"客厅没找到主人"的日志里，躺姿通道**单帧是过的**
+        #   （`外观通道复核(lying)：score=0.617(需≥0.60) reid=0.617 → 接受`），
+        #   但机器人边走边转、姿态在 lying/sitting/upright/unknown 之间跳，
+        #   连续 3 次凑不齐 → 这一圈"共确认 0 位"。
+        # 注意：`max(self.match_required_consecutive, ...)` 保证不低于站立通道的次数。
         self.lying_required_consecutive = max(
             self.match_required_consecutive,
-            int(rospy.get_param("~lying_required_consecutive", 3)),
+            int(rospy.get_param("~lying_required_consecutive", 2)),
         )
-        self.lying_reid_weight = max(0.0, float(rospy.get_param("~lying_reid_weight", 0.75)))
-        self.lying_color_weight = max(0.0, float(rospy.get_param("~lying_color_weight", 0.25)))
+        # 躺姿融合权重（2026-10-12 对齐参考实现 server_robot3）：
+        #   参考默认 reid_weight=1.0 / color_weight=0.0 —— 躺姿**只用 ReID**。
+        #   原因（现场实测）：躺姿裁剪里大半是地板背景，颜色分只有 0.10~0.27，
+        #   按 0.25 的权重会把融合分从 reid 0.53~0.63 拉到 0.47~0.54 < 0.60 门槛，
+        #   于是"躺着的主人"被判成陌生人。颜色对躺姿没有判别力，关掉。
+        self.lying_reid_weight = max(0.0, float(rospy.get_param("~lying_reid_weight", 1.0)))
+        self.lying_color_weight = max(0.0, float(rospy.get_param("~lying_color_weight", 0.0)))
 
         self.say_wait_for_subscribers = bool(rospy.get_param("~say_wait_for_subscribers", True))
         self.say_wait_timeout = float(rospy.get_param("~say_wait_timeout", 15.0))

@@ -249,6 +249,42 @@ class Kinect2StreamWatchdog(object):
         self.warmup_seconds = max(0.0, float(rospy.get_param("~warmup_seconds", 20.0)))
         self.check_period = max(0.2, float(rospy.get_param("~check_period", 1.0)))
         self.recovery_enabled = bool(rospy.get_param("~restart_enabled", True))
+        # ---- 深度流监控（2026-10-17 加）------------------------------------
+        # 现场问题：同一姿势两次识别，一次 ground/3D 全空（深度图在人身上没有点）、
+        # 一次正常 → 说明深度流会间歇性停发。原来只盯彩色图，深度停了没人知道。
+        # 这里用**便宜的 qhd 深度图**做常驻订阅（有订阅者才会让 bridge 处理深度），
+        # 深度停发超过 depth_stall_seconds 就**只重载 bridge nodelet**（不动 manager/USB）。
+        self.depth_monitor_enabled = bool(
+            rospy.get_param("~depth_monitor_enabled", True)
+        )
+        self.depth_topic = str(
+            rospy.get_param("~depth_topic", "/kinect2/qhd/image_depth")
+        )
+        self.depth_stall_seconds = max(
+            2.0, float(rospy.get_param("~depth_stall_seconds", 3.0))
+        )
+        self.depth_restart_enabled = bool(
+            # 2026-10-17 现场决定：**先不自动重启** —— 重启 bridge 会中断彩色输出
+            # 5~20 秒，代价太大。这里只保留监控/日志；需要时再显式打开。
+            rospy.get_param("~depth_restart_enabled", False)
+        )
+        # 什么时候才值得重启：深度停发 12 秒（比一次 5 秒的采集长）才动 bridge，
+        # 避免"深度刚断 3 秒就重启、把正在进行的动作采集打断"。
+        self.depth_restart_after_seconds = max(
+            self.depth_stall_seconds,
+            float(rospy.get_param("~depth_restart_after_seconds", 12.0)),
+        )
+        self.depth_restart_cooldown = max(
+            10.0, float(rospy.get_param("~depth_restart_cooldown", 60.0))
+        )
+        self.depth_max_restarts = max(
+            1, int(rospy.get_param("~depth_max_restarts", 1))
+        )
+        # 只在"动作节点在跑"时订阅深度：任务节点没起来时深度本来就不需要，
+        # 常驻订阅会白白多占 USB/CPU（交接文档：这台机器上深度 ~28ms/帧）。
+        self.depth_require_node = str(
+            rospy.get_param("~depth_require_node", "/owner_action_qwen")
+        )
 
         # ---- 节点名（恢复的对象）------------------------------------------
         self.bridge_node_name = str(rospy.get_param("~bridge_node_name", "/kinect2_bridge"))
@@ -332,10 +368,20 @@ class Kinect2StreamWatchdog(object):
         self.next_action_time = 0.0
         self.last_action_time = 0.0
         self.escalated = False
+        # 深度流状态
+        self.last_depth_time = None
+        self.depth_count = 0
+        self.depth_restart_count = 0
+        self.depth_healthy_since = None
+        self.next_depth_action_time = 0.0
+        self.depth_subscribed_at = 0.0
+        self._depth_nodes_cache = (0.0, None)
 
         self.sub = rospy.Subscriber(
             self.image_topic, Image, self.image_callback, queue_size=1, buff_size=2 ** 24
         )
+        # 深度订阅按需建立（见 check_depth）：只在动作节点运行时才订阅。
+        self.depth_sub = None
         # 便宜的深度保活订阅：让 bridge 的“有订阅者”集合在整轮任务里保持不变，
         # 避免 callbackStatus 触发 device->stop()/startStreams()（每次都是一次风险）。
         self.keepalive_sub = None
@@ -349,7 +395,8 @@ class Kinect2StreamWatchdog(object):
 
         rospy.loginfo(
             "Kinect2 stream watchdog armed: topic=%s stall=%.1fs warmup=%.1fs "
-            "bridge=%s manager=%s keepalive=%s usb_reset=%s(%s:%s) round_retry=%.0fs",
+            "bridge=%s manager=%s keepalive=%s usb_reset=%s(%s:%s) round_retry=%.0fs "
+            "depth=%s(stall %.1fs, restart=%s)",
             self.image_topic,
             self.stall_seconds,
             self.warmup_seconds,
@@ -360,6 +407,9 @@ class Kinect2StreamWatchdog(object):
             self.usb_vendor_id,
             self.usb_product_id,
             self.round_retry_seconds,
+            self.depth_topic if self.depth_monitor_enabled else "off",
+            self.depth_stall_seconds,
+            self.depth_restart_enabled,
         )
 
     # ------------------------------------------------------------------
@@ -373,6 +423,11 @@ class Kinect2StreamWatchdog(object):
     def keepalive_callback(self, _msg):
         with self.lock:
             self.keepalive_count += 1
+
+    def depth_callback(self, _msg):
+        with self.lock:
+            self.last_depth_time = time.time()
+            self.depth_count += 1
 
     def snapshot(self):
         with self.lock:
@@ -714,6 +769,133 @@ class Kinect2StreamWatchdog(object):
         self.last_action_time = 0.0
         self.escalated = False
 
+    def check_depth(self, now):
+        """彩色正常时检查深度流；深度停发**只重载 bridge nodelet**。
+
+        为什么不动 manager/USB：彩色流是好的，动 manager/USB 会把彩色一起打断，
+        代价远大于收益；深度问题先用最轻的一级恢复（重载 bridge）。
+
+        订阅是**按需**的：只有动作节点（默认 /owner_action_qwen）在跑时才订阅
+        /kinect2/qhd/image_depth —— 否则常驻深度订阅会白白多占 USB/CPU。
+        """
+        if not self.depth_monitor_enabled or not self.depth_topic:
+            return
+
+        # rosnode list 比较重（子进程），10 秒才查一次（足够及时地发现动作节点起停）
+        cache_time, cached_nodes = self._depth_nodes_cache
+        if now - cache_time >= 10.0:
+            cached_nodes = self.running_nodes()
+            self._depth_nodes_cache = (now, cached_nodes)
+        needed = bool(
+            cached_nodes is not None
+            and (not self.depth_require_node or self.depth_require_node in cached_nodes)
+        )
+        if not needed:
+            if self.depth_sub is not None:
+                self.depth_sub.unregister()
+                self.depth_sub = None
+                rospy.loginfo("深度流监控：动作节点已退出，取消深度订阅（省 USB/CPU）")
+            self.last_depth_time = None
+            self.depth_healthy_since = None
+            return
+        if self.depth_sub is None:
+            self.depth_sub = rospy.Subscriber(
+                self.depth_topic,
+                Image,
+                self.depth_callback,
+                queue_size=1,
+                buff_size=2 ** 23,
+            )
+            self.depth_subscribed_at = now
+            self.last_depth_time = None
+            rospy.loginfo(
+                "深度流监控：动作节点在跑，开始订阅 %s（停止 %.1fs 报警，"
+                "持续 %.1fs 才重载 bridge）",
+                self.depth_topic,
+                self.depth_stall_seconds,
+                self.depth_restart_after_seconds,
+            )
+            return
+
+        with self.lock:
+            last_depth = self.last_depth_time
+            count = self.depth_count
+        age = now - (last_depth if last_depth is not None else self.depth_subscribed_at)
+        if age <= self.depth_stall_seconds:
+            if self.depth_healthy_since is None:
+                self.depth_healthy_since = now
+            elif (
+                self.depth_restart_count
+                and now - self.depth_healthy_since >= self.recovery_reset_seconds
+            ):
+                rospy.loginfo(
+                    "深度流已稳定 %.0f 秒，深度重启计数归零（累计 %d 次）",
+                    now - self.depth_healthy_since,
+                    self.depth_restart_count,
+                )
+                self.depth_restart_count = 0
+            return
+        self.depth_healthy_since = None
+        rospy.logerr_throttle(
+            30.0,
+            "深度流停发 %.1fs（收到 %d 帧）：地面/家具/3D 判据会缺失，"
+            "动作可能被判 unknown",
+            age,
+            count,
+        )
+
+        if not self.recovery_enabled or not self.depth_restart_enabled:
+            rospy.logerr_throttle(
+                60.0,
+                "深度流停发 %.1fs：深度重启被禁用（只记录，不动 bridge）",
+                age,
+            )
+            return
+        if age < self.depth_restart_after_seconds:
+            # 还没到"值得重启"的时长：可能只是正在采集/推理，先观察
+            return
+        if self.depth_restart_count >= self.depth_max_restarts:
+            rospy.logerr_throttle(
+                60.0,
+                "深度流停发 %.1fs：本轮已重载 bridge %d 次，先不再动"
+                "（避免把彩色流一起拖下水）；请检查 USB/供电",
+                age,
+                self.depth_restart_count,
+            )
+            return
+        if now < self.next_depth_action_time or now < self.next_action_time:
+            return
+
+        nodes = self.running_nodes()
+        if not self.own_stack_alive(nodes):
+            rospy.logerr_throttle(
+                60.0,
+                "深度流停发 %.1fs，但本栈 bridge/manager 不在 master 上；不动 bridge",
+                age,
+            )
+            self.next_depth_action_time = now + 60.0
+            return
+        if not self.usb_device_present():
+            rospy.logerr_throttle(
+                15.0,
+                "深度流停发 %.1fs：Kinect 不在 USB 总线上（整机掉线），等内核重新枚举",
+                age,
+            )
+            self.next_depth_action_time = now + 15.0
+            return
+
+        self.depth_restart_count += 1
+        self.next_depth_action_time = now + self.depth_restart_cooldown
+        rospy.logerr(
+            "深度流停发 %.1fs（收到 %d 帧）：重载 bridge nodelet"
+            "（第 %d/%d 次，只动 bridge、不动 manager/USB）",
+            age,
+            count,
+            self.depth_restart_count,
+            self.depth_max_restarts,
+        )
+        self.restart_bridge()
+
     def perform_next_action(self, now, age, count):
         """按梯子做下一个动作；返回下一次允许动作的时间。"""
         if self.attempts_this_stall < self.bridge_restarts_per_round:
@@ -777,6 +959,7 @@ class Kinect2StreamWatchdog(object):
             age = now - last_message_time
             if age <= self.stall_seconds:
                 self.note_healthy(now)
+                self.check_depth(now)
                 continue
 
             if not self.recovery_enabled:

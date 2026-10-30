@@ -335,9 +335,15 @@ def final_posture_is_horizontal(features):
 
 
 # 「躺在家具上」的自证门槛（2026-10-11 现场标定；要调就调这两个数）：
-#   MAX_OFFSET：人体支撑面读数与周围基准面最多差多少米，超过就认为这一帧自相矛盾；
-#   MIN_MARGIN：人体最低点(p20)允许比周围基准面低多少米，低于它就说明那圈不是他的支撑面。
-FURNITURE_SELF_PROOF_MAX_OFFSET = 0.35
+#   LIE_MAX_HEIGHT：家具面读数的**上限**。人能躺在家具上的高度是有限的
+#     （方凳 0.4 / 沙发 0.5 / 床 0.5~0.6 + 身体厚度 ≈ 0.45~0.95 m）。
+#     超过这个值还报 "elevated"，多半是采样采到了背景（现场那次 1.13 m 就是），
+#     不算"躺在家具上"。
+#   MIN_MARGIN：人体最低点(p20)允许比周围基准面低多少米，低于它就说明那圈
+#     不是他的支撑面（例如人躺在地上、旁边一张床把 local 拉高）。
+# 注：2026-10-12 删掉了原来"|median − local| ≤ 0.35"这条——床上躺着时
+#     框周围那一圈可能是**地板**（local≈0），差值 0.5 会被误判成"不是家具"。
+FURNITURE_LIE_MAX_HEIGHT = 1.00
 FURNITURE_SELF_PROOF_MIN_MARGIN = 0.25
 
 
@@ -349,11 +355,11 @@ def relation_is_elevated(ground_relation):
       2) 支撑面绝对高度中位数 >= 家具高度阈值（默认 0.42m）
       3) 相对本地地面的抬升量 >= 0.24m（兜底，本地地面不可靠时仅供参考）
 
-    ⚠️ 2026-10-11「自证」闸门（配合方案 A）：
+    ⚠️ 2026-10-11 起、「自证」闸门（配合方案 A；2026-10-12 修订）：
       点云自己说 elevated 不算数，还要满足两条自证：
-        ① |支撑面中位数 − 周围基准面| ≤ FURNITURE_SELF_PROOF_MAX_OFFSET(0.35m)
-           —— 人得**贴在**那个支撑面上，而不是"身体读数 1.13m、周围圈 0.64m"这种
-           互相矛盾的一帧；
+        ① 支撑面读数必须在**人能躺的高度范围内**：
+           furniture_height_limit(0.40) ≤ median ≤ FURNITURE_LIE_MAX_HEIGHT(1.00m)
+           —— 读到 1.13 m 这种"比床还高一大截"的，多半不是人躺的家具面；
         ② 人体最低点 p20 ≥ 周围基准面 − 0.25m
            —— 人的最低点不能明显低于那个"基准面"，否则说明那圈根本不是他的支撑面
            （例如人躺在地上、旁边一张床把 local 拉高）。
@@ -367,22 +373,29 @@ def relation_is_elevated(ground_relation):
     median = ground_relation.get("surface_height_median")
     p20 = ground_relation.get("surface_height_p20")
     local = ground_relation.get("local_floor_height_p15")
+    limit = ground_relation.get("furniture_height_limit")
     try:
-        max_offset = float(
-            ground_relation.get("furniture_self_proof_max_offset")
-            or FURNITURE_SELF_PROOF_MAX_OFFSET
+        lie_max = float(
+            ground_relation.get("furniture_lie_max_height")
+            or FURNITURE_LIE_MAX_HEIGHT
         )
     except (TypeError, ValueError):
-        max_offset = FURNITURE_SELF_PROOF_MAX_OFFSET
-    if median is not None and local is not None:
-        if abs(float(median) - float(local)) > max_offset:
+        lie_max = FURNITURE_LIE_MAX_HEIGHT
+    # ① 支撑面读数要在"人能躺的家具高度区间"里
+    if median is not None:
+        median_value = float(median)
+        if median_value > lie_max:
             return False
+        if limit is not None and median_value < float(limit) and ground_relation.get(
+            "status"
+        ) != "elevated":
+            return False
+    # ② 人的最低点不能明显低于周围基准面
     if p20 is not None and local is not None:
         if float(p20) < float(local) - FURNITURE_SELF_PROOF_MIN_MARGIN:
             return False
     if ground_relation.get("status") == "elevated":
         return True
-    limit = ground_relation.get("furniture_height_limit")
     if median is not None and limit is not None:
         return float(median) >= float(limit)
     delta = ground_relation.get("height_above_local_floor")
@@ -674,8 +687,15 @@ class PoseActionAnalyzer:
             return None
         count = min(len(keypoints), len(keypoint_confidences), len(boxes), len(box_confidences))
         best = None
-        best_score = -1.0
-        target_center = 0.5 if target_center is None else float(target_center)
+        best_score = -1e9
+        # 2026-10-17：有"主人框中心"提示时，**中心距离优先**（权重 10），
+        # 避免画面里有更自信/更靠中间的路人时选错人；没有提示时保持原来的软权重。
+        if target_center is None:
+            target_center = 0.5
+            center_weight = 1.0
+        else:
+            target_center = float(target_center)
+            center_weight = 10.0
         for index in range(count):
             valid_keypoints = sum(
                 1 for value in keypoint_confidences[index]
@@ -688,7 +708,7 @@ class PoseActionAnalyzer:
             score = (
                 float(box_confidences[index])
                 + 0.03 * valid_keypoints
-                - abs(center - target_center)
+                - center_weight * abs(center - target_center)
             )
             if score > best_score:
                 best_score = score
@@ -818,6 +838,19 @@ class PoseActionAnalyzer:
             "right_wrist_x": right_wrist_x,
             "left_wrist_y": left_wrist_y,
             "right_wrist_y": right_wrist_y,
+            # 2026-10-17 诊断用：保留关节的**像素坐标**与帧尺寸，
+            # 好让节点层用对齐点云把它们抬到 3D（只打印，不参与判定）。
+            "image_shape": (int(height), int(width)),
+            "joints_px": {
+                "left_shoulder": left_shoulder,
+                "right_shoulder": right_shoulder,
+                "left_hip": left_hip,
+                "right_hip": right_hip,
+                "left_knee": left_knee,
+                "right_knee": right_knee,
+                "left_ankle": left_ankle,
+                "right_ankle": right_ankle,
+            },
         }
 
     def _predict(self, frame):
@@ -1067,7 +1100,8 @@ class PoseActionAnalyzer:
             rospy.loginfo(
                 "坐姿判定依据：最后 1/4 帧 sitting_like 占比 %.2f；"
                 "屈膝帧占比 %.2f；膝-髋/躯干 比值中位 %s（<0.45 才算膝靠近髋）；"
-                "躯干竖直度中位 %.2f",
+                "躯干竖直度中位 %.2f；框高占比中位 %.2f、宽高比中位 %.2f"
+                "（判据标定用，别删）",
                 last_sitting_ratio,
                 sum(1 for value in last if value.get("bent_knee")) / float(len(last)),
                 (
@@ -1083,12 +1117,48 @@ class PoseActionAnalyzer:
                     else "量不到（膝盖或髋没检出来）"
                 ),
                 last_torso,
+                last_height,
+                last_aspect,
             )
             return (
                 "sitting",
                 min(0.90, 0.50 + 0.35 * last_sitting_ratio),
                 "bent-knee seated pose",
             )
+        # 没判出任何动作时，把"差在哪一条"打出来 —— 和上面挥手那条诊断一个道理。
+        # 现场最常见的坐姿失败是：主人**坐在桌子后面**，膝盖/脚踝被挡 → `bent_knee`
+        # 和 `knees_near_hips` 两个坐姿判据都拿不到关键点 → sitting_like 全 False →
+        # 最后只能 unknown(0.00)。没有这一行，日志里分不清是"没人/没关键点"还是
+        # "关键点都在、只是没到阈值"。
+        knee_ratios = [
+            value["knee_hip_ratio"]
+            for value in last
+            if value.get("knee_hip_ratio") is not None
+        ]
+        # 关键点到底缺哪一段：屈膝角要"髋-膝-踝"三点，膝-髋比值只要"髋+膝"两点。
+        # 两个数一对比就知道是"脚踝没了"还是"膝盖位置被带偏"（2026-10-16 现场第二次踩坑）。
+        knee_angle_frames = sum(1 for value in last if value.get("knee_angle") is not None)
+        hip_knee_frames = len(knee_ratios)
+        rospy.loginfo(
+            "没判出动作 -> 有效姿态帧 %d；最后 1/4 帧 sitting_like 占比 %.2f（需≥0.40）、"
+            "lying_like 占比 %.2f（需≥0.40）；屈膝帧占比 %.2f；膝-髋/参考 比值中位 %s"
+            "（<0.45 才算膝盖靠近髋）；躯干竖直度中位 %.2f（>0.42 才算坐姿候选）；"
+            "框高占比中位 %.2f、宽高比中位 %.2f；"
+            "髋+膝+踝三点齐全 %d/%d 帧、髋+膝两点齐全 %d/%d 帧"
+            "（三点 − 两点 = 脚踝缺失的帧数）",
+            len(features),
+            last_sitting_ratio,
+            last_lie_ratio,
+            sum(1 for value in last if value.get("bent_knee")) / float(len(last)),
+            ("%.2f" % median(knee_ratios)) if knee_ratios else "量不到（膝盖或髋没检出来）",
+            last_torso,
+            last_height,
+            last_aspect,
+            knee_angle_frames,
+            len(last),
+            hip_knee_frames,
+            len(last),
+        )
         return ACTION_UNKNOWN, 0.0, "no supported pose action"
 
 
@@ -1109,6 +1179,7 @@ class PointCloudGroundAnalyzer:
         local_ground_padding,
         local_ground_elevation_delta,
         elevated_context_min_height=0.15,
+        furniture_lie_max_height=1.00,
     ):
         self.camera_height = camera_height
         # 地面线拟合结果 y = slope*z + intercept（光学坐标系）。
@@ -1135,6 +1206,10 @@ class PointCloudGroundAnalyzer:
         # 被判成"躺在家具上"(lying)，而不是摔倒(fallen)。
         self.elevated_context_min_height = max(
             0.0, float(elevated_context_min_height)
+        )
+        # 人能躺在家具上的高度上限（米）：超过它就不认"躺在家具上"（见 relation_is_elevated）
+        self.furniture_lie_max_height = max(
+            0.40, float(furniture_lie_max_height)
         )
 
     @staticmethod
@@ -1538,6 +1613,7 @@ class PointCloudGroundAnalyzer:
             "ground_confident": ground_confident,
             "ground_height_limit": self.ground_height_limit,
             "furniture_height_limit": self.furniture_height_limit,
+            "furniture_lie_max_height": self.furniture_lie_max_height,
             "surface_height_median": median,
             "surface_height_p20": p20,
             "surface_height_p80": p80,
@@ -1598,6 +1674,40 @@ class PoseActionRecognitionNode:
             str(rospy.get_param("~sitting_knee_reference", "torso")),
         )
         self.pointcloud_enabled = bool(rospy.get_param("~pointcloud_enabled", True))
+        # 2026-10-17 诊断开关：用对齐点云把髋/膝/踝抬到 3D，打印"离地高度 +
+        # 大腿落差/倾角"。**只打印，不参与任何判定**，用来给"正面坐姿"标定阈值。
+        # 注意：属性名不要和方法 log_leg_geometry_3d() 重名 —— 之前重名导致
+        # 实例属性(bool)把方法盖掉，调用时报 "'bool' object is not callable"。
+        self.leg_geometry_3d_log_enabled = bool(
+            rospy.get_param("~log_leg_geometry_3d", True)
+        )
+        # 2026-10-17：正面坐姿兜底（没时间标定，用人体工学常识值）。
+        # **只在 2D 判定为 unknown 时才尝试**，且阈值远离站姿，见 sitting_3d_accepts()。
+        self.sitting_3d_enabled = bool(
+            rospy.get_param("~sitting_3d_enabled", True)
+        )
+        self.sitting_3d_max_angle_deg = float(
+            rospy.get_param("~sitting_3d_max_angle_deg", 62.0)
+        )
+        self.sitting_3d_max_drop = float(
+            rospy.get_param("~sitting_3d_max_drop", 0.30)
+        )
+        self.sitting_3d_min_horizontal = float(
+            rospy.get_param("~sitting_3d_min_horizontal", 0.15)
+        )
+        self.sitting_3d_min_torso = float(
+            rospy.get_param("~sitting_3d_min_torso", 0.80)
+        )
+        # 2D 的"膝-髋/躯干"比值**不作为门槛**（2026-10-17 现场数据）：
+        #   正对坐姿 0.68、站姿 0.64~0.72 —— 两者重叠，用它挡会把正坐拦掉。
+        # 站姿由 3D 三条（倾角/落差/水平）排除，绰绰有余。
+        # 这里保留参数只为现场还能手动收紧（默认 1.0 = 不限制）。
+        self.sitting_3d_max_knee_hip_ratio = float(
+            rospy.get_param("~sitting_3d_max_knee_hip_ratio", 1.0)
+        )
+        self.sitting_3d_confidence = float(
+            rospy.get_param("~sitting_3d_confidence", 0.55)
+        )
         self.pointcloud_analyzer = PointCloudGroundAnalyzer(
             float(rospy.get_param("~pointcloud_camera_height", 0.85)),
             float(rospy.get_param("~pointcloud_ground_height_limit", 0.35)),
@@ -1613,6 +1723,7 @@ class PoseActionRecognitionNode:
             float(rospy.get_param("~pointcloud_local_ground_padding", 0.85)),
             float(rospy.get_param("~pointcloud_elevated_delta", 0.24)),
             float(rospy.get_param("~pointcloud_elevated_context_min_height", 0.15)),
+            float(rospy.get_param("~pointcloud_furniture_max_lie_height", 1.00)),
         )
         # 相机离地高度自动标定：拆装机器人后相机高度会变，
         # 开机时用点云现场测一次，比写死 0.85 可靠。
@@ -1651,8 +1762,10 @@ class PoseActionRecognitionNode:
         self.request_lock = threading.Lock()
         self.pending_request_id = ""
         self.pending_roi = None
+        self.pending_owner_bbox = None
         self.active_request_id = ""
         self.active_roi = None
+        self.active_owner_bbox = None
         self.last_action = ACTION_UNKNOWN
         self.last_place = PLACE_UNKNOWN
         self.last_pose_action = ACTION_UNKNOWN
@@ -2050,6 +2163,318 @@ class PoseActionRecognitionNode:
         self.capture_rois = capture_rois
         return frames
 
+    # ------------------------------------------------------------------
+    # 2026-10-17 诊断：3D 腿部几何（只打印，不参与判定）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def leg_geometry_from_3d(hip, knee, ankle=None, height_fn=None):
+        """由 3D 髋/膝（光学系 x右 y下 z前）算"大腿落差 / 水平距离 / 倾角"。
+
+        这是给"正面坐姿"准备的：正面坐着时大腿指向镜头，2D 像素几何被压缩、
+        脚踝还经常丢；但 3D 里"髋-膝的竖直落差"很小（大腿近水平），站姿则很大
+        （大腿近竖直），与视角无关。返回空 dict 表示缺髋或膝。
+        """
+        if hip is None or knee is None:
+            return {}
+        measure = height_fn or (lambda point: -float(point[1]))
+        try:
+            hip_height = float(measure(hip))
+            knee_height = float(measure(knee))
+            thigh_drop = abs(hip_height - knee_height)
+            horizontal = math.hypot(
+                float(hip[0]) - float(knee[0]),
+                float(hip[2]) - float(knee[2]),
+            )
+            angle = math.degrees(
+                math.atan2(thigh_drop, max(1e-6, horizontal))
+            )
+        except (TypeError, ValueError, IndexError):
+            return {}
+        out = {
+            "hip_height": hip_height,
+            "knee_height": knee_height,
+            "thigh_drop": thigh_drop,
+            "thigh_horizontal": horizontal,
+            "thigh_angle_deg": angle,
+        }
+        if ankle is not None:
+            try:
+                out["ankle_height"] = float(measure(ankle))
+            except (TypeError, ValueError, IndexError):
+                pass
+        return out
+
+    def _joint_3d(self, cloud, u, v, radius=4, step=2):
+        """在关节像素附近取一小块点云，返回 3D 中位点（或 None）。"""
+        analyzer = self.pointcloud_analyzer
+        if analyzer is None:
+            return None, 0
+        width = int(getattr(cloud, "width", 0))
+        height = int(getattr(cloud, "height", 0))
+        if width <= 1 or height <= 1:
+            return None, 0
+        uvs = []
+        cu = int(round(float(u)))
+        cv = int(round(float(v)))
+        for du in range(-radius, radius + 1, step):
+            for dv in range(-radius, radius + 1, step):
+                uu, vv = cu + du, cv + dv
+                if 0 <= uu < width and 0 <= vv < height:
+                    uvs.append((uu, vv))
+        points, _error = analyzer._read_points(cloud, uvs)
+        if not points:
+            return None, 0
+        xs = sorted(point[0] for point in points)
+        ys = sorted(point[1] for point in points)
+        zs = sorted(point[2] for point in points)
+        mid = len(points) // 2
+        return (xs[mid], ys[mid], zs[mid]), len(points)
+
+    def log_leg_geometry_3d(self, features):
+        """打印最后一帧的 3D 腿部几何（髋/膝/踝离地高度、大腿落差与倾角）。"""
+        if not features or self.pointcloud_analyzer is None:
+            return
+        final = features[-1]
+        joints = final.get("joints_px") or {}
+        image_shape = final.get("image_shape")
+        if not joints or not image_shape:
+            return
+        cloud, cloud_stamp = self.get_latest_pointcloud()
+        if cloud is None:
+            rospy.loginfo("3D 腿部诊断：无可用点云")
+            return
+        where = "点云"
+        age = time.time() - cloud_stamp if cloud_stamp else None
+        if age is not None:
+            where = "点云(%.1fs)" % age
+        # ROI 裁剪帧：把关节像素加回整帧偏移，才能和点云 UV 对齐
+        offset_x = offset_y = 0.0
+        full_shape = image_shape
+        if (
+            self.capture_full_frames
+            and self.capture_rois
+            and self.capture_rois[-1] is not None
+        ):
+            roi = self.capture_rois[-1]
+            offset_x, offset_y = float(roi[0]), float(roi[1])
+            full_shape = self.capture_full_frames[-1].shape[:2]
+        cloud_w = int(getattr(cloud, "width", 0))
+        cloud_h = int(getattr(cloud, "height", 0))
+        if abs(int(full_shape[1]) - cloud_w) > 2 or abs(int(full_shape[0]) - cloud_h) > 2:
+            rospy.loginfo(
+                "3D 腿部诊断：图像 %dx%d 与点云 %dx%d 尺寸不一致，跳过",
+                int(full_shape[1]),
+                int(full_shape[0]),
+                cloud_w,
+                cloud_h,
+            )
+            return
+        measure = self.pointcloud_analyzer.optical_height
+        parts = []
+        for side in ("left", "right"):
+            hip_px = joints.get("%s_hip" % side)
+            knee_px = joints.get("%s_knee" % side)
+            ankle_px = joints.get("%s_ankle" % side)
+            if hip_px is None or knee_px is None:
+                parts.append("%s 髋/膝缺失" % side)
+                continue
+            hip_3d, hip_n = self._joint_3d(
+                cloud, float(hip_px[0]) + offset_x, float(hip_px[1]) + offset_y
+            )
+            knee_3d, knee_n = self._joint_3d(
+                cloud, float(knee_px[0]) + offset_x, float(knee_px[1]) + offset_y
+            )
+            ankle_3d, ankle_n = (None, 0)
+            if ankle_px is not None:
+                ankle_3d, ankle_n = self._joint_3d(
+                    cloud,
+                    float(ankle_px[0]) + offset_x,
+                    float(ankle_px[1]) + offset_y,
+                )
+            geometry = self.leg_geometry_from_3d(
+                hip_3d, knee_3d, ankle_3d, height_fn=measure
+            )
+            if not geometry:
+                parts.append("%s 3D 采样不足(髋%d/膝%d)" % (side, hip_n, knee_n))
+                continue
+            ankle_text = (
+                "%.2f" % geometry["ankle_height"]
+                if "ankle_height" in geometry
+                else "n/a"
+            )
+            parts.append(
+                "%s 髋高=%.2f 膝高=%.2f 踝高=%s 落差=%.2f 水平=%.2f 倾角=%.0f°"
+                "（点 %d/%d/%d 帧%d）"
+                % (
+                    side,
+                    geometry["hip_height"],
+                    geometry["knee_height"],
+                    ankle_text,
+                    geometry["thigh_drop"],
+                    geometry["thigh_horizontal"],
+                    geometry["thigh_angle_deg"],
+                    hip_n,
+                    knee_n,
+                    ankle_n,
+                    len(features),
+                )
+            )
+        rospy.loginfo("3D 腿部诊断（%s，末帧）：%s", where, "；".join(parts))
+
+    @staticmethod
+    def sitting_3d_accepts(
+        angle_deg,
+        thigh_drop,
+        thigh_horizontal,
+        torso_verticality,
+        knee_hip_ratio,
+        max_angle_deg=62.0,
+        max_drop=0.30,
+        min_horizontal=0.15,
+        min_torso=0.80,
+        max_knee_hip_ratio=1.0,
+    ):
+        """3D 坐姿兜底的判据（人体工学常识值，不依赖现场标定）。
+
+        坐姿：大腿近水平/略向下（标准椅子 0~30°；坐在床/沙发这种高一点的家具上
+               时会到 50~60°，2026-10-17 实测 55~58°、落差 0.25~0.26 m）；
+        站姿：大腿近竖直（夹角 66~86°、落差 0.35~0.45 m、水平投影 0.03~0.16 m）。
+        三条同时成立才算坐：角度 ≤62° **且** 落差 ≤0.30 m **且** 水平 ≥0.15 m。
+        站姿的实测样本在"落差"或"水平"上至少有一条不满足（0.35~0.45 / 0.03~0.10）。
+        `max_knee_hip_ratio` 默认 1.0 = 不限制：2D 比值在正坐(0.68)与站姿(0.64~0.72)
+        之间重叠，拿它当门槛会把正坐拦掉（2026-10-17 现场实测）。
+        """
+        try:
+            angle = float(angle_deg)
+            drop = float(thigh_drop)
+            horizontal = float(thigh_horizontal)
+        except (TypeError, ValueError):
+            return False
+        if torso_verticality is None:
+            return False
+        try:
+            torso = float(torso_verticality)
+        except (TypeError, ValueError):
+            return False
+        if max_knee_hip_ratio < 1.0:
+            # 只有现场显式收紧这个参数时，才把 2D 比值当门槛
+            if knee_hip_ratio is None:
+                return False
+            try:
+                ratio = float(knee_hip_ratio)
+            except (TypeError, ValueError):
+                return False
+            if ratio > max_knee_hip_ratio:
+                return False
+        return bool(
+            angle <= max_angle_deg
+            and drop <= max_drop
+            and horizontal >= min_horizontal
+            and torso >= min_torso
+        )
+
+    def sitting_3d_verdict(self, features):
+        """正面坐姿兜底：2D 判不出时，用 3D 大腿几何判 sitting。
+
+        只读点云，不改任何 2D 特征；返回 dict（含 text）或 None。
+        """
+        if not features or self.pointcloud_analyzer is None:
+            return None
+        cloud, _stamp = self.get_latest_pointcloud()
+        if cloud is None:
+            return None
+        split = max(2, int(math.ceil(len(features) / 4.0)))
+        last = features[-split:]
+        torsos = [
+            float(value["torso_verticality"])
+            for value in last
+            if value.get("torso_verticality") is not None
+        ]
+        ratios = [
+            float(value["knee_hip_ratio"])
+            for value in last
+            if value.get("knee_hip_ratio") is not None
+        ]
+        if not torsos:
+            return None
+        lying_ratio = sum(1 for value in last if value.get("lying_like")) / float(len(last))
+        if lying_ratio >= 0.20:
+            return None
+        torso = sorted(torsos)[len(torsos) // 2]
+        knee_hip_ratio = (
+            sorted(ratios)[len(ratios) // 2] if ratios else None
+        )
+        offset_x = offset_y = 0.0
+        if (
+            self.capture_full_frames
+            and self.capture_rois
+            and self.capture_rois[-1] is not None
+        ):
+            roi = self.capture_rois[-1]
+            offset_x, offset_y = float(roi[0]), float(roi[1])
+        measure = self.pointcloud_analyzer.optical_height
+        best = None
+        for side in ("left", "right"):
+            hip_points = []
+            knee_points = []
+            for value in last:
+                joints = value.get("joints_px") or {}
+                hip = joints.get("%s_hip" % side)
+                knee = joints.get("%s_knee" % side)
+                if hip is not None and knee is not None:
+                    hip_points.append((float(hip[0]) + offset_x, float(hip[1]) + offset_y))
+                    knee_points.append((float(knee[0]) + offset_x, float(knee[1]) + offset_y))
+            if not hip_points:
+                continue
+            hip_px = (
+                sorted(point[0] for point in hip_points)[len(hip_points) // 2],
+                sorted(point[1] for point in hip_points)[len(hip_points) // 2],
+            )
+            knee_px = (
+                sorted(point[0] for point in knee_points)[len(knee_points) // 2],
+                sorted(point[1] for point in knee_points)[len(knee_points) // 2],
+            )
+            hip_3d, _ = self._joint_3d(cloud, hip_px[0], hip_px[1])
+            knee_3d, _ = self._joint_3d(cloud, knee_px[0], knee_px[1])
+            geometry = self.leg_geometry_from_3d(
+                hip_3d, knee_3d, height_fn=measure
+            )
+            if not geometry:
+                continue
+            accepted = self.sitting_3d_accepts(
+                geometry["thigh_angle_deg"],
+                geometry["thigh_drop"],
+                geometry["thigh_horizontal"],
+                torso,
+                knee_hip_ratio,
+                max_angle_deg=self.sitting_3d_max_angle_deg,
+                max_drop=self.sitting_3d_max_drop,
+                min_horizontal=self.sitting_3d_min_horizontal,
+                min_torso=self.sitting_3d_min_torso,
+                max_knee_hip_ratio=self.sitting_3d_max_knee_hip_ratio,
+            )
+            text = (
+                "%s 倾角=%.0f° 落差=%.2f 水平=%.2f（躯干=%.2f 膝髋比=%s）"
+                % (
+                    side,
+                    geometry["thigh_angle_deg"],
+                    geometry["thigh_drop"],
+                    geometry["thigh_horizontal"],
+                    torso,
+                    "n/a" if knee_hip_ratio is None else "%.2f" % knee_hip_ratio,
+                )
+            )
+            candidate = dict(geometry)
+            candidate.update(
+                {"side": side, "accepted": accepted, "text": text}
+            )
+            if accepted and (best is None or geometry["thigh_angle_deg"] < best["thigh_angle_deg"]):
+                best = candidate
+            rospy.loginfo(
+                "3D 坐姿检查：%s → %s", text, "成立" if accepted else "不成立"
+            )
+        return best
+
     def analyze_ground_relation(self, frame, pose_features):
         if not self.pointcloud_enabled:
             return {"status": "unknown", "reason": "point cloud disabled"}
@@ -2240,6 +2665,7 @@ class PoseActionRecognitionNode:
         payload = (message.data or "").strip()
         request_id = ""
         roi = None
+        owner_bbox = None
         if payload.startswith("{"):
             try:
                 data = json.loads(payload)
@@ -2249,12 +2675,14 @@ class PoseActionRecognitionNode:
             if isinstance(data, dict):
                 request_id = str(data.get("request_id", "") or "")
                 roi = parse_owner_roi(data.get("roi"))
+                owner_bbox = parse_owner_roi(data.get("owner_bbox"))
         else:
             roi = parse_owner_roi(payload)
 
         with self.request_lock:
             self.pending_request_id = request_id
             self.pending_roi = roi
+            self.pending_owner_bbox = owner_bbox
 
         if self.request_inference("trigger"):
             rospy.loginfo(
@@ -2292,6 +2720,8 @@ class PoseActionRecognitionNode:
                 self.pending_request_id = ""
                 self.active_roi = self.pending_roi
                 self.pending_roi = None
+                self.active_owner_bbox = self.pending_owner_bbox
+                self.pending_owner_bbox = None
             request_id = self.active_request_id
             rospy.loginfo(
                 "Recognizing action (%s) request_id=%s", reason, request_id or "(none)"
@@ -2309,13 +2739,51 @@ class PoseActionRecognitionNode:
             pose_features = []
             if self.pose_enabled and self.pose_analyzer.ready:
                 try:
-                    pose_features = self.pose_analyzer.extract_features(frames)
+                    # 2026-10-17：把"主人框中心"作为**选人提示**传给姿态模型
+                    # （不裁剪画面）。画面里有多个人的时候，避免分析到站着的路人。
+                    target_center = None
+                    if self.active_owner_bbox is not None and len(self.active_owner_bbox) >= 4:
+                        x1, _y1, x2, _y2 = self.active_owner_bbox
+                        full_width = None
+                        if self.capture_full_frames:
+                            full_width = float(self.capture_full_frames[-1].shape[1])
+                        elif frames:
+                            full_width = float(frames[-1].shape[1])
+                        if full_width:
+                            center_px = 0.5 * (float(x1) + float(x2))
+                            last_roi = (
+                                self.capture_rois[-1]
+                                if self.capture_rois
+                                else None
+                            )
+                            if last_roi is not None:
+                                roi_w = max(1.0, float(last_roi[2]) - float(last_roi[0]))
+                                target_center = (
+                                    center_px - float(last_roi[0])
+                                ) / roi_w
+                            else:
+                                target_center = center_px / full_width
+                            target_center = min(1.0, max(0.0, target_center))
+                            rospy.loginfo(
+                                "动作选人提示：按主人框中心 x=%.3f 选人（不裁剪画面）",
+                                target_center,
+                            )
+                    pose_features = self.pose_analyzer.extract_features(
+                        frames, target_center=target_center
+                    )
                     pose_action, pose_confidence, pose_reason = self.pose_analyzer.classify(
                         pose_features
                     )
                 except Exception as exc:
                     pose_reason = "pose inference failed: %s" % exc
                     rospy.logwarn("Pose action inference failed: %s", exc)
+
+            # 2026-10-17 诊断：3D 腿部几何（只打印，不影响 action 判定）
+            if self.leg_geometry_3d_log_enabled and pose_features:
+                try:
+                    self.log_leg_geometry_3d(pose_features)
+                except Exception as exc:  # noqa: BLE001
+                    rospy.logwarn("3D 腿部诊断失败（不影响识别）：%s", exc)
 
             ground_relation = self.analyze_ground_relation(
                 frames[-1] if frames else self.get_latest_frame(),
@@ -2328,6 +2796,29 @@ class PoseActionRecognitionNode:
                 ground_relation,
                 final_pose_is_horizontal,
             )
+            # 2026-10-17：正面坐姿兜底。**只在 2D 判定为 unknown 时**才尝试，
+            # 所以站姿（2D 也是 unknown，但 3D 大腿近竖直）不会误判；
+            # 躺姿/摔倒/挥手已经由 2D 给出结论，这里根本不会进入。
+            if (
+                self.sitting_3d_enabled
+                and action == ACTION_UNKNOWN
+                and pose_features
+            ):
+                try:
+                    verdict = self.sitting_3d_verdict(pose_features)
+                except Exception as exc:  # noqa: BLE001
+                    verdict = None
+                    rospy.logwarn("3D 坐姿兜底失败（忽略，不影响其它判定）：%s", exc)
+                if verdict:
+                    action = "sitting"
+                    place = PLACE_UNKNOWN
+                    pose_action = "sitting"
+                    pose_confidence = float(self.sitting_3d_confidence)
+                    pose_reason = "3d thigh geometry (weak evidence)"
+                    rospy.loginfo(
+                        "3D 坐姿兜底成立（2D 判 unknown）：%s",
+                        verdict.get("text", ""),
+                    )
             speech = result_to_speech(action, place)
             self.set_result_overlay(
                 pose_features,

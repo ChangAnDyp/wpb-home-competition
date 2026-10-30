@@ -18,8 +18,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": ["_navigate_enabled:=false", "_owner_enrollment_enabled:=true"],
       "preLaunchTask": "加载比赛参数到参数服务器",
@@ -38,8 +38,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search/scripts",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_auto_repeat_seconds:=5",
@@ -66,8 +66,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": ["_owner_count:=1", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
       "console": "integratedTerminal",
@@ -85,8 +85,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/owner_voice_reid_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": ["_owner_count:=2", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
       "console": "integratedTerminal",
@@ -104,8 +104,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/face_body_enroll_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/face_body_enroll_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": ["_owner_count:=2", "_navigate_enabled:=false", "_reuse_existing_profile:=false"],
       "console": "integratedTerminal",
@@ -124,8 +124,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=3",
@@ -148,8 +148,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/enroll_search_action_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
@@ -172,8 +172,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=3",
@@ -195,8 +195,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
@@ -248,14 +248,14 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=3",
         "_reuse_existing_profile:=false",
         "_navigate_enabled:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room,kitchen,bedroom,canteen",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -277,14 +277,14 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
         "_reuse_existing_profile:=true",
         "_navigate_enabled:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room,kitchen,bedroom,canteen",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -310,15 +310,15 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
         "_reuse_existing_profile:=true",
         "_navigate_enabled:=true",
         "_navigate_dry_run:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -354,15 +354,15 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
         "_reuse_existing_profile:=true",
         "_navigate_enabled:=true",
         "_navigate_dry_run:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -396,15 +396,15 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
         "_reuse_existing_profile:=true",
         "_navigate_enabled:=true",
         "_navigate_dry_run:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -418,9 +418,11 @@
       "justMyCode": false
     },
 
-    // ---------- ⑭d 摔倒靠近·导航版（方案 B-2，照 server_robot3 的策略）----------
-    // 与 ⑭b 完全一样，只把"摔倒靠近方式"换成 navigate：
-    //   _fall_approach_mode:=navigate
+    // ---------- ⑭d 空跑去客厅 + 摔倒靠近走导航（方案 B-2）----------
+    // ⚠️ 2026-10-12 明确范围（用户要求）：**全局导航保持空跑**，
+    //    _navigate_dry_run:=true —— "去客厅"这一步不移动（日志会打"空跑模式：不移动"）。
+    //    只有**"摔倒后靠近主人"这一步**走 move_base（_fall_approach_mode:=navigate），
+    //    也就是能用 RViz marker 点云看到目标点的那个方案。其它一切与 ⑭b 相同。
     // 流程（三步，和参考实现 server_robot3 一致）：
     //   ① 快照：在主人框里用**整条身体带 15%~85%** 取样点云，先按拟合出的地面线
     //      剔掉贴地点，再取中位数 → 主人 3D 位置（前/侧）。这样取到的是**身体质心**，
@@ -446,19 +448,19 @@
     // 现场先确认：a) 导航段能不能规划到 0.75 m 的 standoff（日志会打"路径预检通过/没过"和目标坐标）；
     //   b) 最后 0.25 m 补齐后停在哪（期望 0.5 m 左右）。
     {
-      "name": "⑭d 摔倒靠近·导航版（方案B-2）task_all_owners",
+      "name": "⑭d 空跑去客厅+摔倒靠近走导航（方案B-2）task_all_owners",
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=2",
         "_reuse_existing_profile:=true",
         "_navigate_enabled:=true",
         "_navigate_dry_run:=true",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
@@ -496,8 +498,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_service_robot/scripts/task_all_owners.py",
-      "cwd": "${workspaceFolder}/src/wpb_service_robot",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_owner_count:=3",
@@ -506,12 +508,129 @@
         "_navigate_dry_run:=true",
         "_approach_enabled:=true",
         "_action_pose_image_size:=640",
-        "_waypoint_file:=${workspaceFolder}/src/wpb_service_robot/config/waypoints.xml",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
         "_search_waypoints:=living_room",
         "_exit_waypoint_name:=exit",
         "_trash_announce_enabled:=false",
         "_action_pointcloud_enabled:=true",
         "_action_use_owner_roi:=false",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑯ 比赛整体流程（门口 → 客厅注册 → 逐房间找人）----------
+    // 2026-10-15 现场定稿流程（对照 ⑫ 的差异就在下面这 4 行参数）：
+    //   ① 起点在门口，先**真导航**到客厅（_start_waypoint:=living_room，新参数）；
+    //   ② 在客厅做主人注册（_reuse_existing_profile:=false，3 位）；
+    //   ③ 注册完成后自动播「请志愿者就位，我即将开始寻找。」→ 原地停 5 秒
+    //      （不需要参数，默认就是；想改秒数加 _search_ready_pause:=8.0）；
+    //   ④ 再按 _search_waypoints 顺序逐房间找人，动作播报带房间名
+    //      （主人张三正在客厅坐着），找到摔倒/挥手就走走近流程；
+    //   ⑤ 全部结束 → 回出口航点 exit。
+    // 与 ⑫ 的差别（⑫ 还没同步这几项）：
+    //   _reid_device:=cuda:0 / _action_pose_device:=cuda:0 / _face_ctx_id:=0（上显卡）
+    //   _fall_approach_mode:=navigate（摔倒靠近用方案 B-2，带 RViz marker）
+    //   _start_waypoint:=living_room（先去客厅注册）
+    // ⚠️ 第一次务必先跑 ⑯b（空跑彩排）确认播报顺序，再跑本配置真开。
+    // ⚠️ 真导航前必须在 RViz 里用 "2D Pose Estimate" 告诉 AMCL 机器人位置，
+    //    否则 move_base 规划必失败（日志会一直导航超时/ABORTED）。
+    //    2026-10-16 起本配置用 _auto_initial_pose:=false **关掉了任务侧的
+    //    自动初始位姿**：AMCL 的初值不再被强制设成 exit 航点，完全听你在 RViz
+    //    里点的那一次。所以在跑 ⑯ 之前，一定要先点 2D Pose Estimate。
+    //    （原来开着的时候，你手点的位置会在任务启动瞬间被 exit 航点覆盖掉。）
+    // GPU 不稳时（nvidia-smi 连不上）先把三项 cuda 参数删掉，退回 CPU。
+    {
+      "name": "⑯ 比赛整体流程（门口→客厅注册→逐房间找人）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=3",
+        "_reuse_existing_profile:=false",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=false",
+        "_auto_initial_pose:=false",
+        "_start_waypoint:=living_room",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
+        "_search_waypoints:=living_room,kitchen,canteen,bedroom,bedroom2",
+        "_fallback_waypoints:=bedroom2=bedroom",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        // 2026-10-17 现场要求：
+        //   · 人脸注册图片数 = **10 张**（循环"数量或时长谁先到谁停"，
+        //     10 × 0.30 s ≈ 3 s 就结束；face_capture_seconds=8 s 仍作安全上限）
+        //   · **人脸阶段不做取景体检**（播报结束后直接开始采集）；身形阶段照旧
+        "_face_sample_count:=10",
+        "_framing_check_face:=false",
+        // 任务侧"找人"用的姿态检测器分辨率（和动作节点那个 _action_pose_image_size 不是一回事）：
+        //   默认 416（face_body_enroll_test.py:1212）、设备 CPU（scan_pose_device 默认 cpu）。
+        //   416 → 640：CPU 实测 18ms → 29ms/帧（+11ms，交接文档），内存只多几十 MB；
+        //   显存 0（仍在 CPU 跑，不加 CUDA context —— 4GB 卡上这点很关键）。
+        "_pose_image_size:=640",
+        // 2026-10-17 现场 A/B 结论：**ROI 裁剪反而把腿部关键点带偏**，先关掉。
+        //   · ⑯（ROI 开 + 640）：坐姿 unknown，屈膝帧 0/9，但"髋+膝+踝三点齐全 3/3"
+        //     —— 关键点都在，只是位置被读成"直腿"（膝-髋比 0.64）；
+        //   · ⑭b（ROI 关 + 416）：同样坐着，sitting(0.85) ✓，屈膝帧 1.00。
+        //   你们 launch 里也记过前车之鉴："无条件带 ROI 时裁到人身上，姿态模型
+        //   一个关键点都找不到"。
+        // 所以 ROI 关、只保留 640 分辨率（416→640 在 CPU 上只多 ~11ms/帧）。
+        // 想再试 ROI 就把它改回 true，并对比同一姿势同一距离的"屈膝帧占比"。
+        "_action_use_owner_roi:=false",
+        "_action_pose_image_size:=640",
+        "_reid_device:=cuda:0",
+        "_action_pose_device:=cuda:0",
+        "_face_ctx_id:=0",
+        "_fall_approach_mode:=navigate",
+        "_tts_chars_per_second:=7.0"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // ---------- ⑯b 整体流程·空跑彩排（不移动，只核对播报顺序）----------
+    // 和 ⑯ 完全一样，只把 _navigate_dry_run 设成 true：去客厅、去各房间都当
+    // "已到达"，一步都不开。用来在不动车的情况下确认：
+    //   注册 → 「请志愿者就位」→ 停 5 秒 → 「开始寻找主人」→ 逐房间流程
+    // 的播报顺序和间隔是否正确；_search_waypoints 只留一个房间省时间。
+    {
+      "name": "⑯b 整体流程·空跑彩排（不移动）",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "/home/dyp/catkin_ws/src/wpb_service_robot/scripts/task_all_owners.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_service_robot",
+      "envFile": "${workspaceFolder}/.vscode/ros.env",
+      "args": [
+        "_owner_count:=2",
+        "_reuse_existing_profile:=true",
+        "_navigate_enabled:=true",
+        "_navigate_dry_run:=true",
+        "_auto_initial_pose:=false",
+        "_start_waypoint:=living_room",
+        "_waypoint_file:=/home/dyp/waypoints.xml",
+        "_search_waypoints:=living_room",
+        "_exit_waypoint_name:=exit",
+        "_trash_announce_enabled:=false",
+        "_action_pointcloud_enabled:=true",
+        // 和 ⑯ 一致：人脸注册 10 张、人脸阶段跳过取景体检
+        "_face_sample_count:=10",
+        "_framing_check_face:=false",
+        // 和 ⑯ 一致：任务侧找人的姿态检测器 640（CPU）
+        "_pose_image_size:=640",
+        // 和 ⑯ 保持完全一致（⑯b 只是把 _navigate_dry_run 设成 true）：
+        // ROI 关（现场 A/B 证明裁剪会把腿部关键点带偏）、保留 640 分辨率。
+        "_action_use_owner_roi:=false",
+        "_action_pose_image_size:=640",
+        "_reid_device:=cuda:0",
+        "_action_pose_device:=cuda:0",
+        "_face_ctx_id:=0",
+        "_fall_approach_mode:=navigate",
         "_tts_chars_per_second:=7.0"
       ],
       "console": "integratedTerminal",
@@ -524,8 +643,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/person_reid_owner_test.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/person_reid_owner_test.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "console": "integratedTerminal",
       "justMyCode": false
@@ -537,10 +656,10 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/yoloworld_async.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/yoloworld_async.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
-      "args": ["_model_path:=${workspaceFolder}/src/yoloworld_perception/models/yolov8s-world-person.pt"],
+      "args": ["_model_path:=/home/dyp/catkin_ws/src/yoloworld_perception/models/yolov8s-world-person.pt"],
       "console": "integratedTerminal",
       "justMyCode": false
     },
@@ -551,8 +670,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/competition/feature_check.py",
-      "cwd": "${workspaceFolder}/competition",
+      "program": "/home/dyp/catkin_ws/competition/feature_check.py",
+      "cwd": "/home/dyp/catkin_ws/competition",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "console": "integratedTerminal",
       "justMyCode": false
@@ -586,12 +705,12 @@
       "name": "⑦【起栈】ROS: 启动机器人栈（含 TTS+ASR）",
       "type": "ros",
       "request": "launch",
-      "target": "${workspaceFolder}/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
+      "target": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
       "arguments": [
         "start_rviz:=false",
         "start_asr:=true",
         "start_tts:=true",
-        "map:=${workspaceFolder}/src/wpb_service_robot/maps/map.yaml"
+        "map:=/home/dyp/catkin_ws/src/wpb_service_robot/maps/map.yaml"
       ]
     },
 
@@ -610,7 +729,7 @@
       "name": "⑦b【起栈】注册专用（ASR 窗口 2.5 秒 + 语速 0.85）",
       "type": "ros",
       "request": "launch", 
-      "target": "${workspaceFolder}/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
+      "target": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/launch/task1_owner_search_bringup.launch",
       "arguments": [
         "start_rviz:=false",
         "start_asr:=true",
@@ -618,7 +737,7 @@
         "asr_window_seconds:=2.5",
         "start_yolo:=false",
         "tts_length_scale:=0.85",
-        "map:=${workspaceFolder}/src/wpb_service_robot/maps/map.yaml"
+        "map:=/home/dyp/catkin_ws/src/wpb_service_robot/maps/map.yaml"
       ]
     },
 
@@ -642,8 +761,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/feedback_after_recognition.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/feedback_after_recognition.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "console": "integratedTerminal",
       "justMyCode": false
@@ -658,8 +777,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search/scripts",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/qwen_action_recognition_node.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_auto_repeat_seconds:=5",
@@ -691,8 +810,8 @@
       "type": "python",
       "request": "launch",
       "python": "/usr/bin/python3",
-      "program": "${workspaceFolder}/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
-      "cwd": "${workspaceFolder}/src/wpb_task1_owner_search",
+      "program": "/home/dyp/catkin_ws/src/wpb_task1_owner_search/scripts/task1_find_owner_real.py",
+      "cwd": "/home/dyp/catkin_ws/src/wpb_task1_owner_search",
       "envFile": "${workspaceFolder}/.vscode/ros.env",
       "args": [
         "_navigate_enabled:=false",

@@ -1,0 +1,23 @@
+robot_radius: 0.25
+# 两个参数分工要分清（2026-10-16 现场重新定）：
+#   robot_radius  = **硬门槛**：离障碍 ≤0.25 m 的格子代价 253，规划器绝不进去。
+#                   实测车身（URDF body_link）半径 0.226 m → 车体到障碍最小余量 2.4 cm。
+#   inflation_radius = **代价梯度**：0.25→inflation 这一圈代价从 253 衰减到 0，
+#                   规划器"不乐意走"但允许走 —— 它决定局部规划器提前多远开始绕障。
+# 原来 0.5：排斥带宽 0.25 m。但场地通道只有 0.6~1.0 m 宽（实测 exit->canteen 0.71 m、
+#   bedroom2 0.60 m），0.5 时窄道整条都是高代价，局部规划器在里面磨蹭/振荡。
+# 现在 0.40：排斥带 0.15 m，窄道更"敢走"，同时仍留 0.15 m 的提前反应距离；
+#   配合把导航速度从 0.35 降到 0.30 m/s（降 15%，见 wpb_real_navigation.launch），
+#   一个控制周期的位移从 3.5 cm 降到 3.0 cm。
+# 注意：不要再动 robot_radius（0.25 已经是实测车身 + 2.4 cm 余量；涨到 0.30 会让
+#   bedroom2 那条 0.60 m 的通道直接不可通行）。
+inflation_radius: 0.40
+obstacle_range: 1.0
+raytrace_range: 6.0
+observation_sources: base_lidar
+base_lidar: {
+    data_type: LaserScan,
+    topic: /scan,
+    marking: true,
+    clearing: true
+    }

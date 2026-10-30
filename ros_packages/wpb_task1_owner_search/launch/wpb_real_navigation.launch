@@ -82,12 +82,19 @@
   </group>
 
   <node if="$(arg start_move_base)" pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
-    <rosparam file="$(find wpb_home_tutorials)/nav_lidar/costmap_common_params.yaml" command="load" ns="global_costmap" />
-    <rosparam file="$(find wpb_home_tutorials)/nav_lidar/costmap_common_params.yaml" command="load" ns="local_costmap" />
-    <rosparam file="$(find wpb_home_tutorials)/nav_lidar/local_costmap_params.yaml" command="load" />
-    <rosparam file="$(find wpb_home_tutorials)/nav_lidar/global_costmap_params.yaml" command="load" />
-    <rosparam file="$(find wpb_home_tutorials)/nav_lidar/local_planner_params.yaml" command="load" />
-    <rosparam param="WpbhLocalPlanner/max_vel_trans">0.35</rosparam>
+    <!-- Keep the tested competition costmap and planner parameters inside this
+         repository. The local planner implementation still comes from
+         wpb_home/wpbh_local_planner, but its tuning is versioned here. -->
+    <rosparam file="$(find wpb_task1_owner_search)/config/nav_lidar/costmap_common_params.yaml" command="load" ns="global_costmap" />
+    <rosparam file="$(find wpb_task1_owner_search)/config/nav_lidar/costmap_common_params.yaml" command="load" ns="local_costmap" />
+    <rosparam file="$(find wpb_task1_owner_search)/config/nav_lidar/local_costmap_params.yaml" command="load" />
+    <rosparam file="$(find wpb_task1_owner_search)/config/nav_lidar/global_costmap_params.yaml" command="load" />
+    <rosparam file="$(find wpb_task1_owner_search)/config/nav_lidar/local_planner_params.yaml" command="load" />
+    <!-- 2026-10-16：inflation_radius 0.5 -> 0.40 之后，局部规划器的"排斥带"
+         从 0.25 m 缩到 0.15 m，提前反应距离变短 —— 用降速补一点：
+         0.35 -> 0.30 m/s（**降 15%**；10 Hz 控制周期内位移 3.5 cm -> 3.0 cm）。
+         现场要求：不再往下压（0.25 太慢，整场多花的时间不划算）。 -->
+    <rosparam param="WpbhLocalPlanner/max_vel_trans">0.30</rosparam>
     <rosparam param="WpbhLocalPlanner/max_vel_rot">0.8</rosparam>
     <rosparam param="WpbhLocalPlanner/acc_scale_trans">1.5</rosparam>
     <rosparam param="WpbhLocalPlanner/acc_scale_rot">0.6</rosparam>

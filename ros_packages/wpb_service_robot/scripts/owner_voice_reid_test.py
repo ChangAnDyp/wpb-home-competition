@@ -78,8 +78,41 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             0.0,
             float(rospy.get_param("~owner_score_margin_threshold", 0.04)),
         )
+        # 2026-10-17 现场要求：分数分叉（margin）改用**最近 N 帧的中位数**来算，
+        # 避免单帧噪声把两个主人的分数拉近、误触发"分不清是谁"。
+        # 1 = 关闭（退回单帧）；建议 5。注意它只影响 margin 闸门，
+        # 每一帧"是否命中"仍然用该帧自己的分数。
+        self.owner_score_margin_frames = max(
+            1, int(rospy.get_param("~owner_score_margin_frames", 5))
+        )
+        # 每份档案的 identity_score 时间序列：{owner_index: [score, ...]}
+        self._owner_score_history = {}
         self.face_crop_padding = float(rospy.get_param("~face_crop_padding", 0.20))
         self.face_crop_top_ratio = float(rospy.get_param("~face_crop_top_ratio", 0.68))
+        # ---- 人脸↔人体 的"绑定闸门"（2026-10-16 现场要求）----
+        # 人脸是在**候选人体框的裁剪图**里检测的，所以正常情况下不会串到别人身上；
+        # 但两人框重叠/同框时，框里可能混进别人的脸，于是"主人的身形"配上了
+        # "别人的脸" —— 判定就会乱。两道闸门：
+        #   ① face_bind_require_single_person：**画面里不止一个人体框时，本次不采信人脸**，
+        #      直接走外观（ReID）+姿态判定。
+        #      ⚠️ 默认**关**：站立通道本来就"必须有人脸"（没人脸→拒绝），
+        #      一旦画面里有第二个人（观众/队友），站着的主人会彻底认不出来。
+        #      只有"现场保证单人"时才建议打开。
+        #   ② face_bind_max_faces：候选框里检出多于这个数目的脸就不采信
+        #      （比 ① 精细：两人同框但明显分属两个框时仍只信自己那张脸）。
+        # 想启用 ①：起栈传 _face_bind_require_single_person:=true。
+        self.face_bind_require_single_person = bool(
+            rospy.get_param("~face_bind_require_single_person", False)
+        )
+        self.face_bind_max_faces = max(
+            1, int(rospy.get_param("~face_bind_max_faces", 1))
+        )
+        # 2026-10-17 现场要求：候选框里多张脸时**不再整帧弃用**，改为取其中
+        # "最大/最居中"的那张脸（见 select_largest_face，面积为主、居中为副）。
+        # 置 false 可退回旧行为（多脸 → 不采信人脸）。
+        self.face_bind_allow_multi = bool(
+            rospy.get_param("~face_bind_allow_multi", True)
+        )
 
         self.face_app = None
         self.face_model_ready = False
@@ -320,6 +353,18 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         self.scan_timeout = max(1.0, float(rospy.get_param("~scan_timeout", 35.0)))
         self.scan_step_angle = max(0.02, float(rospy.get_param("~scan_step_angle", 0.18)))
         self.scan_pause = max(0.0, float(rospy.get_param("~scan_pause", 0.35)))
+        # 原地旋转护栏（2026-10-16）：
+        # 车体（含机械臂）原地旋转时，会把**侧面/斜后方**的东西扫进去 ——
+        # 现场就是转圈找人时撞到旁边的椅子腿。雷达装在车体中心、且厂商 filter 把
+        # <0.25 m 的点全丢掉，所以只有"贴身"级别的距离才需要硬拦：
+        # 全向（360°）最近距离 ≤ 这个值就**暂停这一拍旋转**（只停转，不后退）。
+        # 0 = 关闭。取值建议 0.26~0.35：低于车体半径(0.25)没意义，太大则机器人停在
+        # 离墙 0.3 m 的地方时会把这一间房的搜索卡住（日志会打"旋转护栏"）。
+        # 依赖 scan_any_min_distance()（task_all_owners 里订阅 /scan 时才有），
+        # 单独跑本文件（③ 那套）时取不到，会自动跳过 —— 行为不变。
+        self.scan_turn_guard_distance = max(
+            0.0, float(rospy.get_param("~scan_turn_guard_distance", 0.30))
+        )
         # 单次里程计读数之间允许的"真实转动"上限（弧度）。
         # 原代码是硬编码 0.7 rad（40°），太大：里程计噪声只要小于 40°
         # 就被当成真的在转，而且累加时取的是绝对值，噪声不抵消、全部
@@ -357,6 +402,10 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         self.latest_odom_x = None
         self.latest_odom_y = None
         self.latest_odom_stamp = 0.0
+        # 走近主人的"看护循环"要用实际速度判断"卡住了没有 / 是不是已经慢停下来"，
+        # 所以顺手把 odom 的 twist 也存下来（wpb_home_core 会填 linear/angular）。
+        self.latest_odom_linear_speed = None
+        self.latest_odom_angular_speed = None
         self.cmd_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
         self.move_base = actionlib.SimpleActionClient("move_base", MoveBaseAction)
 
@@ -798,6 +847,14 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         self.action_result = None
         self.action_result_event.clear()
         payload = {"request_id": request_id}
+        # 2026-10-17：总是把主人框作为**选人提示**发给动作节点（不是裁剪！）。
+        # 现场：两个主人在画面里时，动作节点按"最自信/最居中"自己挑人，
+        # 会选到站着的那位，把躺着的 owner 的 pose 特征算成站姿 → unknown。
+        # 选人提示只影响"挑谁"，不动画面（裁剪会把腿部关键点带偏，
+        # 所以 _action_use_owner_roi 仍然是关的）。
+        owner_bbox_hint = self.action_owner_roi(owner_result)
+        if owner_bbox_hint:
+            payload["owner_bbox"] = owner_bbox_hint
         # 只有调用方明确要求"只看主人 ROI"时才把 ROI 发过去。
         # 注意：节点把"触发里带的 ROI"当成最高优先级，会绕过它自己的
         # use_owner_roi 开关；之前无条件带 ROI，导致
@@ -962,6 +1019,13 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             # 看不到躺着的人），必须知道已经走了多远。
             self.latest_odom_x = float(message.pose.pose.position.x)
             self.latest_odom_y = float(message.pose.pose.position.y)
+            # 速度是给"看护循环"用的：判断"卡住不动"还是"慢停下来算到位"。
+            linear = message.twist.twist.linear
+            angular = message.twist.twist.angular
+            self.latest_odom_linear_speed = math.hypot(
+                float(linear.x), float(linear.y)
+            )
+            self.latest_odom_angular_speed = float(angular.z)
             self.latest_odom_stamp = time.time()
 
     def get_latest_odom_xy(self):
@@ -971,6 +1035,29 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 return None, None, None
             age = time.time() - float(getattr(self, "latest_odom_stamp", 0.0) or 0.0)
             return self.latest_odom_x, self.latest_odom_y, age
+
+    def get_latest_odom_speeds(self, max_age=None):
+        """返回 (线速度, 角速度, age)；没收到/数据太旧返回 (None, None, age)。
+
+        看护循环用它区分三种情况：
+          · 还在走（线速度大）→ 正常，继续等；
+          · 慢下来了（线速度小且剩余很近）→ 当作到位；
+          · 又没进展又没速度（线速度、角速度都≈0）→ 判定卡住。
+        """
+        with self.lock:
+            if getattr(self, "latest_odom_linear_speed", None) is None:
+                return None, None, None
+            stamp = float(getattr(self, "latest_odom_stamp", 0.0) or 0.0)
+            age = time.time() - stamp if stamp > 0.0 else None
+            if max_age is not None and age is not None and age > float(max_age):
+                return None, None, age
+            return (
+                float(self.latest_odom_linear_speed),
+                None
+                if getattr(self, "latest_odom_angular_speed", None) is None
+                else float(self.latest_odom_angular_speed),
+                age,
+            )
 
     def init_yolo_window(self):
         if not self.show_yolo_window or self.yolo_window_failed:
@@ -1302,10 +1389,50 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 deadline += time.time() - before_wait
             now = time.time()
             if moving:
-                twist = Twist()
-                twist.angular.z = self.scan_angular_speed
-                self.cmd_pub.publish(twist)
-                self.update_yolo_window("小步旋转寻找主人")
+                # 原地旋转护栏（2026-10-16）：只要**全向**最近距离贴到了车体，
+                # 就暂停这一拍旋转 —— 车体旋转会横扫侧面的椅子腿/桌腿，
+                # 而"正前方 25°"那条护栏根本管不到侧面。
+                turn_guard = None
+                guard_fn = getattr(self, "scan_any_min_distance", None)
+                if guard_fn is not None:
+                    try:
+                        turn_guard = guard_fn()
+                    except Exception:  # noqa: BLE001 - 护栏坏了也不能把扫描流程带崩
+                        turn_guard = None
+                if (
+                    turn_guard is not None
+                    and self.scan_turn_guard_distance > 0.0
+                    and float(turn_guard) <= self.scan_turn_guard_distance
+                ):
+                    # 只停转、不后退：后退同样可能撞到后面的东西。
+                    self.stop_base()
+                    self._scan_turn_guard_blocks = (
+                        int(getattr(self, "_scan_turn_guard_blocks", 0)) + 1
+                    )
+                    rospy.logwarn_throttle(
+                        2.0,
+                        "旋转护栏：全向最近 %.2f m ≤ %.2f m，暂停旋转"
+                        "（已挡 %d 次；旁边有椅子腿/桌腿贴着车体，转过去就会撞）",
+                        float(turn_guard),
+                        self.scan_turn_guard_distance,
+                        self._scan_turn_guard_blocks,
+                    )
+                    if self._scan_turn_guard_blocks in (1, 10):
+                        print(
+                            "[旋转护栏] 全向最近 %.2f m ≤ %.2f m，暂停旋转（第 %d 次）"
+                            % (
+                                float(turn_guard),
+                                self.scan_turn_guard_distance,
+                                self._scan_turn_guard_blocks,
+                            ),
+                            flush=True,
+                        )
+                    self.update_yolo_window("旋转护栏：旁边太近，暂停转")
+                else:
+                    twist = Twist()
+                    twist.angular.z = self.scan_angular_speed
+                    self.cmd_pub.publish(twist)
+                    self.update_yolo_window("小步旋转寻找主人")
             else:
                 self.stop_base()
                 self.update_yolo_window("停顿观察画面")
@@ -1503,18 +1630,46 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
         return vector / norm
 
     @staticmethod
-    def select_largest_face(faces):
+    def select_largest_face(faces, image_shape=None):
+        """框里多张脸时选一张：**面积为主，居中为副**（2026-10-17）。
+
+        原来是"纯面积最大"。现场候选框里常混进旁边人的脸（尤其画面里还有
+        队友/观众），面积最大那张不一定是主人；但"离裁剪图中心更近"通常就是
+        候选人体框里的那个人。所以：分数 = 面积 × 检测分数 × 居中系数，
+        其中居中系数最多只扣 25%，保证**面积仍是主导**、居中只在相近时起作用。
+        """
         if not faces:
             return None
+        height = width = None
+        if image_shape is not None:
+            try:
+                height, width = image_shape[:2]
+            except (TypeError, ValueError):
+                height = width = None
+        half_diag = (
+            math.hypot(width / 2.0, height / 2.0)
+            if width and height
+            else None
+        )
 
         def face_priority(face):
             bbox = getattr(face, "bbox", None)
             if bbox is None or len(bbox) < 4:
                 return 0.0
-            width = max(0.0, float(bbox[2]) - float(bbox[0]))
-            height = max(0.0, float(bbox[3]) - float(bbox[1]))
+            width_px = max(0.0, float(bbox[2]) - float(bbox[0]))
+            height_px = max(0.0, float(bbox[3]) - float(bbox[1]))
             det_score = float(getattr(face, "det_score", 1.0) or 1.0)
-            return width * height * det_score
+            score = width_px * height_px * det_score
+            if half_diag and score > 0.0:
+                face_cx = 0.5 * (float(bbox[0]) + float(bbox[2]))
+                face_cy = 0.5 * (float(bbox[1]) + float(bbox[3]))
+                dist_norm = min(
+                    1.0,
+                    math.hypot(face_cx - width / 2.0, face_cy - height / 2.0)
+                    / max(1.0, half_diag),
+                )
+                score *= 1.0 - 0.25 * dist_norm
+            return score
 
         return max(faces, key=face_priority)
 
@@ -1620,7 +1775,9 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
                 rospy.logwarn("InsightFace failed on %s crop: %s", region_name, exc)
                 continue
 
-            face = self.select_largest_face(faces)
+            face = self.select_largest_face(
+                faces, image_shape=getattr(face_image, "shape", None)
+            )
             if face is None:
                 continue
             face_count += len(faces) if faces is not None else 0
@@ -1649,6 +1806,8 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             "embedding": best_embedding,
             "region": best_region,
             "face_count": face_count,
+            # 多张脸时选的是"最大/最居中"的那张（面积为主、居中为副）
+            "pick": "largest_centered" if face_count > 1 else "only",
             # 人脸框在裁剪图里的短边像素数。人脸越小，特征越不可信 ——
             # 2~3 米外的人脸只有三四十像素，同一段视频里相似度能在 0.09~0.44
             # 之间乱跳（实测），这种"人脸"不该有资格一票否决。
@@ -2397,10 +2556,52 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             face_elapsed_ms = 0.0
             face_reason = "face disabled"
             if self.face_model_ready and face_profiles_ready:
-                face_data, face_elapsed_ms, face_reason = self.extract_face_embedding(
-                    record["crop"],
-                    candidate=record["meta"],
-                )
+                # 闸门①：画面里不止一个人体框 → 本次不采信人脸（防"主人身形配别人的脸"）
+                if self.face_bind_require_single_person and len(records) > 1:
+                    face_reason = "bind guard: %d person boxes in frame" % len(records)
+                    rospy.loginfo_throttle(
+                        2.0,
+                        "画面里有 %d 个人体框 -> 本次不采信人脸（防错绑），"
+                        "改用外观(ReID)+姿态判定",
+                        len(records),
+                    )
+                else:
+                    face_data, face_elapsed_ms, face_reason = self.extract_face_embedding(
+                        record["crop"],
+                        candidate=record["meta"],
+                    )
+                    # 闸门②：候选框里检出多张脸 → 分不清哪张是这个人的，不采信
+                    if (
+                        face_data is not None
+                        and int(face_data.get("face_count", 0) or 0) > self.face_bind_max_faces
+                    ):
+                        if self.face_bind_allow_multi:
+                            # 2026-10-17 现场要求：多张脸时**取最大/最居中**的那张，
+                            # 不再整帧弃用（弃用后只剩 ReID，三人档案很容易"分不清"）。
+                            rospy.loginfo_throttle(
+                                2.0,
+                                "候选人体框里检出 %d 张脸（> %d）-> 取其中最大/最居中的那张"
+                                "（%s，不再整帧弃用）",
+                                int(face_data.get("face_count", 0) or 0),
+                                self.face_bind_max_faces,
+                                face_data.get("pick", "largest_centered"),
+                            )
+                            face_reason = "multi-face: picked %s (%d faces)" % (
+                                face_data.get("pick", "largest_centered"),
+                                int(face_data.get("face_count", 0) or 0),
+                            )
+                        else:
+                            rospy.loginfo_throttle(
+                                2.0,
+                                "候选人体框里检出 %d 张脸（> %d）-> 本次不采信人脸，"
+                                "改用外观(ReID)+姿态判定",
+                                int(face_data.get("face_count", 0) or 0),
+                                self.face_bind_max_faces,
+                            )
+                            face_reason = "bind guard: %d faces in crop" % int(
+                                face_data.get("face_count", 0) or 0
+                            )
+                            face_data = None
                 if face_data is not None:
                     face_embedding = face_data["embedding"]
                     face_region = face_data.get("region", "")
@@ -2463,13 +2664,91 @@ class OwnerVoiceReidTest(PersonReidOwnerTest):
             if owner_index not in owner_best_scores or score > owner_best_scores[owner_index]:
                 owner_best_scores[owner_index] = score
         ranked_owner_scores = sorted(owner_best_scores.values(), reverse=True)
-        score_margin = None
+        score_margin_frame = None
         if len(ranked_owner_scores) >= 2:
-            score_margin = ranked_owner_scores[0] - ranked_owner_scores[1]
+            score_margin_frame = ranked_owner_scores[0] - ranked_owner_scores[1]
+
+        # 2026-10-17：margin 用"最近 N 帧每份档案分数的中位数"来算。
+        # 单帧噪声（某个候选框/裁剪变体偶然把两个主人拉近）不再直接触发
+        # "分不清是谁"；真正的接近会在多帧中位数上体现出来。
+        score_margin, margin_source, medians = self.smoothed_owner_score_margin(
+            owner_best_scores,
+            names={
+                int(result.get("owner_index", -1)): result.get("owner_name", "")
+                for result in results
+            },
+        )
+        if score_margin is None:
+            score_margin = score_margin_frame
 
         best_result = max(results, key=lambda item: item["identity_score"])
         best_result["owner_score_margin"] = score_margin
+        best_result["owner_score_margin_frame"] = score_margin_frame
+        best_result["owner_score_margin_source"] = margin_source
+        best_result["owner_score_medians"] = medians
         return best_result
+
+    def smoothed_owner_score_margin(self, owner_best_scores, names=None):
+        """把每份档案最近 N 帧的 identity_score 取中位数，再算 margin。
+
+        返回 (margin, source, medians)：
+          · margin：中位数算出的"第一名 − 第二名"；不足两份档案时 None
+          · source："median5" / "frame"（N=1 或历史不足）
+          · medians：{owner_index: 中位分}
+
+        为什么只平滑 margin、不平滑"是否命中"：命中判定还要保留单帧的敏感性
+        （否则人会走开、身份要即时失效），而 margin 本来就是"分不分得清"的
+        稳定性指标，用多帧中位数更合理。
+        """
+        names = names or {}
+        window = max(1, int(getattr(self, "owner_score_margin_frames", 1) or 1))
+        history = getattr(self, "_owner_score_history", None)
+        if history is None:
+            history = self._owner_score_history = {}
+        if window <= 1:
+            history.clear()
+            return None, "frame", {}
+        if len(owner_best_scores) < 2:
+            # 这一帧只有一份档案有分（比如另一个人的候选暂时没出现）：
+            # 不算 margin，但**保留历史**，等两份档案都出现时接着用。
+            return None, "frame", {}
+
+        # 只保留当前仍存在的档案，避免删档/换人后旧分数拖累 margin
+        for stale in [idx for idx in history if idx not in owner_best_scores]:
+            history.pop(stale, None)
+        for owner_index, value in owner_best_scores.items():
+            series = history.setdefault(owner_index, [])
+            series.append(float(value))
+            if len(series) > window:
+                del series[:-window]
+
+        medians = {
+            owner_index: float(np.median(series))
+            for owner_index, series in history.items()
+            if series
+        }
+        if len(medians) < 2:
+            return None, "frame", medians
+        ranked = sorted(medians.values(), reverse=True)
+        margin = ranked[0] - ranked[1]
+        if history:
+            samples = min(len(series) for series in history.values() if series)
+        else:
+            samples = 0
+        source = "median%d" % samples if samples > 1 else "frame"
+        if samples > 1:
+            detail = "，".join(
+                "%s=%.3f" % (names.get(idx) or ("主人%d" % idx), value)
+                for idx, value in sorted(medians.items())
+            )
+            rospy.loginfo_throttle(
+                2.0,
+                "分数时序聚合（最近 %d 帧中位）：%s → margin=%.3f",
+                samples,
+                detail,
+                margin,
+            )
+        return margin, source, medians
 
     def announce_owner_result(self, result):
         score = result["score"]

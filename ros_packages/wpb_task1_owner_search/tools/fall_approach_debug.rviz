@@ -1,23 +1,22 @@
-# 摔倒靠近调试用 RViz 配置：点云 + 调试 Marker（主人估计点/standoff 目标点/采样点）。
-# 用法（另开一个终端，栈已经在跑）：
-#   rosrun rviz rviz -d ~/catkin_ws/src/wpb_task1_owner_search/tools/fall_approach_debug.rviz
-# 说明：Fixed Frame 必须是 map；任务节点跑完一轮后 Marker 会保留（latched），方便复盘。
 Panels:
   - Class: rviz/Displays
-    Help Height: 78
+    Help Height: 138
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /Global Options1
         - /Status1
-        - /MarkerArray1
       Splitter Ratio: 0.5
-    Tree Height: 700
+    Tree Height: 173
   - Class: rviz/Views
     Expanded:
       - /Current View1
     Name: Views
     Splitter Ratio: 0.5
+Preferences:
+  PromptSaveOnExit: true
+Toolbars:
+  toolButtonStyle: 2
 Visualization Manager:
   Class: ""
   Displays:
@@ -27,7 +26,7 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Line Style:
-        Line Width: 0.03
+        Line Width: 0.029999999329447746
         Value: Lines
       Name: Grid
       Normal Cell Count: 0
@@ -41,15 +40,30 @@ Visualization Manager:
       Value: true
     - Class: rviz/TF
       Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
       Frame Timeout: 15
       Frames:
         All Enabled: false
         base_footprint:
           Value: true
+        base_link:
+          Value: true
+        body_link:
+          Value: true
+        kinect2_dock:
+          Value: true
+        kinect2_ir_optical_frame:
+          Value: true
+        kinect2_rgb_optical_frame:
+          Value: true
+        laser:
+          Value: true
         map:
           Value: true
         odom:
           Value: true
+      Marker Alpha: 1
       Marker Scale: 0.5
       Name: TF
       Show Arrows: false
@@ -59,10 +73,18 @@ Visualization Manager:
         map:
           odom:
             base_footprint:
-              {}
+              base_link:
+                body_link:
+                  {}
+                kinect2_dock:
+                  kinect2_ir_optical_frame:
+                    kinect2_rgb_optical_frame:
+                      {}
+                laser:
+                  {}
       Update Interval: 0
       Value: true
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
       Class: rviz/Map
       Color Scheme: map
       Draw Behind: true
@@ -72,48 +94,62 @@ Visualization Manager:
       Unreliable: false
       Use Timestamp: false
       Value: true
-    # 注意：这一条是 Kinect 原始点云（按 Z 轴渐变上色），不是调试 Marker。
-    # 现场看到的"竖直起来、带渐变蓝的点云片"就是它（墙面/地面），别和 /fall_approach/markers 混了。
-    - Class: rviz/PointCloud2
-      Alpha: 0.6
+    - Alpha: 0.6000000238418579
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 3.9615511894226074
+        Min Value: -5.191708087921143
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: AxisColor
+      Decay Time: 0
       Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Min Color: 0; 0; 0
       Name: 原始点云(kinect2, 按Z渐变·不是Marker)
       Position Transformer: XYZ
       Queue Size: 2
       Selectable: false
       Size (Pixels): 1
-      Size (m): 0.005
+      Size (m): 0.004999999888241291
       Style: Points
       Topic: /kinect2/qhd/points
       Unreliable: false
       Use Fixed Frame: true
-      Color Transformer: AxisColor
+      Use rainbow: true
       Value: true
+    - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 2
-        Min Value: -1
+        Max Value: 10
+        Min Value: -10
         Value: true
       Axis: Z
-      Color: 255; 255; 255
+      Channel Name: intensity
+      Class: rviz/LaserScan
+      Color: 255; 255; 0
+      Color Transformer: Intensity
+      Decay Time: 0
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-    - Class: rviz/LaserScan
-      Color: 255; 255; 0
-      Enabled: true
       Name: LaserScan
       Position Transformer: XYZ
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
+      Size (m): 0.009999999776482582
       Style: Points
       Topic: /scan
       Unreliable: false
       Use Fixed Frame: true
+      Use rainbow: true
       Value: true
-    # 摔倒靠近的调试 Marker：红=主人估计点(躯干) 绿=standoff目标 蓝=机器人
-    #   青=真正用来估位置的点(躯干锚点窗口) 灰=整条身体带 黄线=身体主方向(头↔脚)
     - Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /fall_approach/markers
@@ -137,32 +173,35 @@ Visualization Manager:
     - Class: rviz/FocusCamera
     - Class: rviz/Measure
     - Class: rviz/SetInitialPose
+      Theta std deviation: 0.2617993950843811
       Topic: /initialpose
+      X std deviation: 0.5
+      Y std deviation: 0.5
     - Class: rviz/SetGoal
       Topic: /move_base_simple/goal
   Value: true
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 6
+      Distance: 4.829473972320557
       Enable Stereo Rendering:
-        Stereo Eye Separation: 0.06
+        Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Field of View: 0.7853981852531433
       Focal Point:
         X: 0
         Y: 0
         Z: 0
       Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.01
-      Pitch: 1.0
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.16479632258415222
       Target Frame: <Fixed Frame>
-      Value: Orbit (rviz)
-      Yaw: 0.0
+      Yaw: 2.3031692504882812
     Saved: ~
 Window Geometry:
   Displays:
@@ -170,6 +209,9 @@ Window Geometry:
   Height: 900
   Hide Left Dock: false
   Hide Right Dock: true
+  QMainWindow State: 000000ff00000000fd00000001000000000000023a000002e8fc0200000002fb000000100044006900730070006c006100790073010000006e000001a50000018200fffffffb0000000a00560069006500770073010000021f000001370000013200ffffff000002ce000002e800000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
   Width: 1300
-  X: 40
-  Y: 30
+  X: 144
+  Y: 54

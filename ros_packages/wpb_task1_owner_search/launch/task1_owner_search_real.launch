@@ -29,6 +29,14 @@
        注意：调快后要同步调大各脚本的 tts_chars_per_second，
        否则脚本会按"原速"估算播报时长、说完还在干等。 -->
   <arg name="tts_length_scale" default="1.0" />
+  <!-- TTS 引擎透传（2026-10-15 移植 sherpa-onnx）：
+       默认 piper（行为不变）；起栈时加 tts_engine:=sherpa 切换到新中文模型。 -->
+  <arg name="tts_engine" default="sherpa" />
+  <arg name="sherpa_model_dir" default="$(env HOME)/models/vits-zh-hf-fanchen-C" />
+  <arg name="sherpa_model_file" default="vits-zh-hf-fanchen-C.onnx" />
+  <arg name="sherpa_sid" default="2" />
+  <arg name="sherpa_speed" default="1.4" />
+  <arg name="sherpa_loudness_mode" default="fixed" />
   <arg name="start_task" default="true" />
   <arg name="start_rviz" default="true" />
 
@@ -166,6 +174,12 @@
       <arg name="asr_window_seconds" value="$(arg asr_window_seconds)" />
       <arg name="asr_tts_squelch" value="$(arg asr_tts_squelch)" />
       <arg name="tts_length_scale" value="$(arg tts_length_scale)" />
+      <arg name="tts_engine" value="$(arg tts_engine)" />
+      <arg name="sherpa_model_dir" value="$(arg sherpa_model_dir)" />
+      <arg name="sherpa_model_file" value="$(arg sherpa_model_file)" />
+      <arg name="sherpa_sid" value="$(arg sherpa_sid)" />
+      <arg name="sherpa_speed" value="$(arg sherpa_speed)" />
+      <arg name="sherpa_loudness_mode" value="$(arg sherpa_loudness_mode)" />
     </include>
   </group>
 

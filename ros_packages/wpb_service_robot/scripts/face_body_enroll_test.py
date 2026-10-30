@@ -105,6 +105,14 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
         self.lying_extra_aspect_min = max(
             0.05, float(rospy.get_param("~lying_extra_aspect_min", 0.55))
         )
+        # 躯干竖直度判据（2026-10-12 增加，对齐参考实现 server_robot3 的
+        # pose_lying_torso_verticality=0.45）：站着的人躯干竖直度≈1.0，
+        # 坐着≈0.5~0.7，躺下 < 0.45。框形状判据对"斜躺/侧躺"会漏，这条补上。
+        # 用姿态模型在同一次推理里算出的 torso_verticality，不额外跑一次推理。
+        self.pose_lying_torso_verticality = max(
+            0.05,
+            min(1.5, float(rospy.get_param("~pose_lying_torso_verticality", 0.45))),
+        )
         # "坐着但完全看不到人脸"时才走外观通道，阈值要比躺着更高：
         # 坐着的人本来应该能看到正脸，看不到说明角度很偏，风险更大。
         self.sitting_appearance_threshold = max(
@@ -175,6 +183,12 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
         # 个子高就自然站远一点，个子矮就站近一点，画面效果一致。
         self.framing_check_enabled = bool(
             rospy.get_param("~framing_check_enabled", True)
+        )
+        # 2026-10-17 现场要求：**人脸注册不再做取景体检** —— 播报结束后直接开始
+        # 采人脸（现场人脸阶段 3 次体检都判"太近/贴边"，白花 ~2.3 s）。
+        # 身形阶段仍照旧做取景体检。要恢复人脸体检：传 _framing_check_face:=true。
+        self.framing_check_face = bool(
+            rospy.get_param("~framing_check_face", False)
         )
         self.framing_check_samples = max(
             1, int(rospy.get_param("~framing_check_samples", 5))
@@ -577,8 +591,13 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
 
         # 边播报边刷新窗口：这句说完马上就要体检/采集，窗口不能停
         self.speak_with_live_window(self.face_announce_text % self.owner_name)
-        # 取景体检：不合适就先提示对方调整，再开始采集
-        self.ensure_framing("face")
+        # 2026-10-17：人脸阶段默认**跳过取景体检**，播报结束后直接开始采集。
+        # （身形阶段的 ensure_framing("body") 不受影响）
+        if self.framing_check_face:
+            # 取景体检：不合适就先提示对方调整，再开始采集
+            self.ensure_framing("face")
+        else:
+            rospy.loginfo("人脸注册：跳过取景体检，播报结束后直接开始采集")
         self.play_ding()
 
         deadline = time.time() + self.face_capture_seconds
@@ -927,8 +946,9 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
                 keypoint_confidences = []
 
         def pose_label_for(index, box, score):
+            """同一次推理里拿到这个人的"姿态标签 + 躯干竖直度"（后者给躺姿判据用）。"""
             if index >= len(keypoints) or index >= len(keypoint_confidences):
-                return ""
+                return "", None
             try:
                 feature = analyzer._feature(
                     {
@@ -940,14 +960,15 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
                     image.shape,
                 )
             except Exception:
-                return ""
+                return "", None
+            verticality = feature.get("torso_verticality")
             if feature.get("lying_like"):
-                return "lying"
+                return "lying", verticality
             if feature.get("sitting_like"):
-                return "sitting"
+                return "sitting", verticality
             if feature.get("upright_like"):
-                return "upright"
-            return ""
+                return "upright", verticality
+            return "", verticality
         try:
             xyxy = analyzer._tensor_to_list(boxes.xyxy)
             confidences = analyzer._tensor_to_list(boxes.conf)
@@ -967,6 +988,7 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
             area_ratio = ((x2 - x1) * (y2 - y1)) / image_area
             if area_ratio < self.detection_min_area_ratio:
                 continue
+            pose_label, torso_verticality = pose_label_for(index, box, score)
             candidates.append(
                 {
                     "bbox": [x1, y1, x2, y2],
@@ -975,7 +997,9 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
                     "aspect_ratio": float(x2 - x1) / max(1.0, float(y2 - y1)),
                     "priority": float(score) * area_ratio,
                     "height_ratio": (y2 - y1) / float(height),
-                    "pose_label": pose_label_for(index, box, score),
+                    "pose_label": pose_label,
+                    # 躯干竖直度：躺姿判据用它（0=完全横躺，1=完全竖直）
+                    "torso_verticality": torso_verticality,
                     # 关键点也一起带出去：摔倒靠近要用"左右肩+左右髋"的中点当躯干锚点，
                     # 只在这个小窗口里取点云（现场实测：整条身体带里大部分点在家具/墙面上）。
                     "keypoints": (
@@ -1008,22 +1032,38 @@ class FaceBodyEnrollTest(OwnerVoiceReidTest):
         到不了 1.25），父类判不出躺姿，于是落进"严格人脸判定"被误拒——
         这正是"躺着的主人找不到"的原因。
 
-        补判：框高度占画面比例很小、且形状不是细长条 → 也按躺姿处理。
+        三条判据任一成立即按躺姿处理（走宽松的 ReID 通道，阈值 0.6，不要求人脸）：
+          ① 基类：框宽高比 ≥ lying_aspect_ratio_threshold(1.25)；
+          ② 框很短：height_ratio ≤ lying_extra_height_ratio(0.70) 且
+             aspect ≥ lying_extra_aspect_min(0.55)；
+          ③ **躯干竖直度 < pose_lying_torso_verticality(0.45)**（2026-10-12 新增，
+             对齐参考实现；斜躺/侧躺时框形状可能看不出，但躯干是横的）。
         按躺姿处理后会走宽松的 ReID 通道（阈值 0.6），不要求人脸。
         """
         if super().is_lying_candidate(candidate):
             return True
         aspect = float(candidate.get("aspect_ratio", 0.0) or 0.0)
         height_ratio = float(candidate.get("height_ratio", 1.0) or 1.0)
-        lying = (
+        by_shape = (
             height_ratio <= self.lying_extra_height_ratio
             and aspect >= self.lying_extra_aspect_min
         )
+        verticality = candidate.get("torso_verticality")
+        by_verticality = False
+        if verticality is not None:
+            try:
+                by_verticality = (
+                    float(verticality) < self.pose_lying_torso_verticality
+                )
+            except (TypeError, ValueError):
+                by_verticality = False
+        lying = bool(by_shape or by_verticality)
         rospy.loginfo_throttle(
             2.0,
-            "候选人体框：宽高比=%.2f 高度占比=%.2f -> %s",
+            "候选人体框：宽高比=%.2f 高度占比=%.2f 躯干竖直度=%s -> %s",
             aspect,
             height_ratio,
+            "无" if verticality is None else "%.2f" % float(verticality),
             "按躺姿处理(走宽松ReID通道)" if lying else "按站立处理(以脸为准)",
         )
         return lying

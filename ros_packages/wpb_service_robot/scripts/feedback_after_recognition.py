@@ -18,6 +18,8 @@
 依赖的比赛规则（《最新赛事规则.pdf》2.6 评分细则）：
   * 识别主人、判定行为，都以"语音播报"为主要判分依据 —— 本模块是分数兑现层
   * 播报格式统一为「主人{姓名}正在{动作}」
+    （2026-10-15 起带上房间：room 由主任务按"当前航点"传入，
+     例如 living_room → 客厅，播报成「主人张三正在客厅坐着」）
   * 姓名还没接上（脸部注册未完成）时省略姓名 → "主人正在挥手"
   * 暂不区分床 / 沙发 / 椅子
 
@@ -50,8 +52,10 @@ ACTION_PHRASE = {
 
 # 动作 -> 下一步该做什么（只给名字，具体执行由后续模块实现）
 ACTION_NEXT_STEP = {
-    "sitting": "ask_switch",
-    "lying": "ask_switch",
+    # 2026-10-16 现场要求：坐姿 / 躺在床上（以及躺在家具上）**不再追问电器开关**，
+    # 播报完"动作+位置"就直接继续下一个航点。要做别的事就在任务节点里认这个名字。
+    "sitting": "next_waypoint",
+    "lying": "next_waypoint",
     "fallen": "approach_and_assist",
     "sudden_fall": "approach_and_assist",
     "waving": "approach_and_ask_help",
@@ -144,18 +148,33 @@ class Feedback(object):
         )
 
 
-def compose_speech(phrase, owner_name=DEFAULT_OWNER_NAME):
-    """拼出「主人{姓名}{短语}」。
+def compose_speech(phrase, owner_name=DEFAULT_OWNER_NAME, room=""):
+    """拼出「主人{姓名}正在{房间}{动作}」。
 
-    owner_name 为空  -> "主人正在挥手"
-    owner_name 有值  -> "主人张三正在挥手"
+    owner_name 为空      -> "主人正在挥手"
+    owner_name 有值      -> "主人张三正在挥手"
+    再给房间（来自航点名）-> "主人张三正在客厅挥手"
+    摔倒类短语（不带"正在"）-> "主人张三在客厅摔倒了"
     """
     name = (owner_name or "").strip()
-    return "主人%s%s" % (name, phrase)
+    room = (room or "").strip()
+    text = phrase
+    if room:
+        if phrase.startswith("正在"):
+            text = "正在%s%s" % (room, phrase[len("正在"):])
+        else:
+            text = "在%s%s" % (room, phrase)
+    return "主人%s%s" % (name, text)
 
 
-def feedback_for_action(action, place="unknown", owner_name=DEFAULT_OWNER_NAME):
-    """动作识别结果 -> 反馈。纯逻辑，不依赖 ROS。"""
+def feedback_for_action(
+    action, place="unknown", owner_name=DEFAULT_OWNER_NAME, room=""
+):
+    """动作识别结果 -> 反馈。纯逻辑，不依赖 ROS。
+
+    room 由主任务按"当前所在航点"传进来（例如 living_room → 客厅），
+    最终播报成「主人张三正在客厅坐着」。
+    """
     key = str(action or "").strip().lower()
     phrase = ACTION_PHRASE.get(key)
     if phrase is None:
@@ -166,10 +185,10 @@ def feedback_for_action(action, place="unknown", owner_name=DEFAULT_OWNER_NAME):
             detail={"action": key, "place": place, "known": False},
         )
     return Feedback(
-        speech=compose_speech(phrase, owner_name),
+        speech=compose_speech(phrase, owner_name, room),
         next_step=ACTION_NEXT_STEP[key],
         source="pose",
-        detail={"action": key, "place": place, "known": True},
+        detail={"action": key, "place": place, "room": room, "known": True},
     )
 
 
